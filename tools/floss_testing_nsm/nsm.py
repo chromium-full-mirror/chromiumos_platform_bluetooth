@@ -167,6 +167,20 @@ class NSM(object):
             f"Fields: {fields}"
         )
 
+    @staticmethod
+    def strip_tauto_prefix(test_name):
+        """Strip the 'tauto' prefix from the test name.
+
+        This makes the test names consistent between Floss and Bluez.
+
+        Returns:
+            The test name without the 'tauto' prefix.
+        """
+        prefix = "tauto."
+        if test_name.startswith(prefix):
+            test_name = test_name[len(prefix) :]
+        return test_name
+
     def extract_test_list_from_csv(self, filepath):
         """Extracts a list of test names from a CSV file.
 
@@ -185,7 +199,10 @@ class NSM(object):
 
                 # Add the test name into a set. Note that duplicate test
                 # names from multiple builds will be filtered away.
-                distinct_test_names = {row[test_name_key] for row in reader}
+                distinct_test_names = {
+                    self.strip_tauto_prefix(row[test_name_key])
+                    for row in reader
+                }
 
         except Exception as e:
             self.abort(f"extract test list: {e}")
@@ -466,14 +483,12 @@ class NSM(object):
             self.counts[build_name]["unstable"] = 0
             self.counts[build_name]["unrun"] = 0
 
-        def calc_pass_rate(line):
-            passed = int(line[PASS])
-            failed = int(line[FAIL])
-            total = passed + failed
+        def calc_pass_rate(pass_count, fail_count):
+            total = pass_count + fail_count
             if total <= 0:
                 return 0.0
 
-            pass_rate = passed / total
+            pass_rate = pass_count / total
             return pass_rate
 
         def print_build_header(build_name):
@@ -580,14 +595,28 @@ class NSM(object):
                     self.counts[build_name] = {}
                     reset_test_counts_of_build(build_name)
 
-                test_name = line[TEST_NAME]
+                test_name = self.strip_tauto_prefix(line[TEST_NAME])
                 if test_name in intersect_test_list:
-                    pass_rate = calc_pass_rate(line)
+                    pass_count = int(line["pass"])
+                    fail_count = int(line["fail"])
+                    # If 'test_name' already exists in test_results, it means
+                    # we have two tests, with and without the tauto prefix,
+                    # whose names are normalized to the same one. Here we merge
+                    # the two tests' pass and fail count to update pass rate.
+                    if test_name in self.test_results[build_name]:
+                        existing_res = self.test_results[build_name][test_name]
+                        pass_count += existing_res.pass_count
+                        fail_count += existing_res.fail_count
+                    pass_rate = calc_pass_rate(pass_count, fail_count)
                     self.test_results[build_name][test_name] = PassFailTuple(
-                        line[PASS], line[FAIL], pass_rate
+                        pass_count, fail_count, pass_rate
                     )
-                    if pass_rate < self.OSR_CRITERION:
-                        self.unstable_tests[build_name].add(test_name)
+
+        # Determine the set of unstable tests.
+        for build_name, tests in self.test_results.items():
+            for test_name, result in tests.items():
+                if result.pass_rate < self.OSR_CRITERION:
+                    self.unstable_tests[build_name].add(test_name)
 
         for build_name, tests in self.test_results.items():
             print_build_header(build_name)
@@ -823,7 +852,7 @@ class NSM(object):
             for line in sorted(
                 reader, key=lambda x: (x[BUILD_NAME], x[TEST_NAME])
             ):
-                test_name = line[TEST_NAME]
+                test_name = cls.strip_tauto_prefix(line[TEST_NAME])
                 if test_name not in cat_test_set:
                     # the test is not in this category
                     continue

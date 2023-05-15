@@ -74,6 +74,10 @@ bluetooth_AdapterBBHealth.bb_6_test.floss,R113-15393.15.0,8,0,0,0,0
 bluetooth_AdapterBBHealth.bb_7_test.floss,R113-15393.15.0,8,0,0,0,0
 bluetooth_AdapterBBHealth.bb_8_test.floss,R113-15393.15.0,8,0,0,0,0
 bluetooth_AdapterBBHealth.bb_9_test.floss,R113-15393.15.0,8,0,1,0,0
+tauto.bluetooth_AdapterAAHealth.aa_3_test.floss,R113-15393.15.0,1,0,1,0,0
+tauto.bluetooth_AdapterAAHealth.aa_4_test.floss,R113-15393.15.0,2,0,2,0,0
+tauto.bluetooth_AdapterAAHealth.aa_8_test.floss,R113-15393.15.0,5,0,0,0,0
+tauto.bluetooth_AdapterBBHealth.bb_1_test.floss,R113-15393.15.0,11,0,2,0,0
 tast.nonplatform0.HostType0.npf0_0_test_floss,R113-15393.15.0,12,0,0,0,0
 tast.nonplatform0.HostType0.npf0_1_test_floss,R113-15393.15.0,10,0,1,0,0
 tast.nonplatform0.HostType0.npf0_2_test_floss,R113-15393.15.0,11,0,3,0,0

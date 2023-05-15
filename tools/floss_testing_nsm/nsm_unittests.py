@@ -59,7 +59,7 @@ class TestNSM2(unittest.TestCase):
         self.assertEqual(self.pf_floss_valid_osrs[self.nsm.DEV], [0.8])
 
     def test_platform_floss_valid_osrs_beta(self):
-        self.assertEqual(self.pf_floss_valid_osrs[self.nsm.BETA], [0.75])
+        self.assertEqual(self.pf_floss_valid_osrs[self.nsm.BETA], [0.7])
 
     def test_platform_floss_dev_average_nsm(self):
         floss_dev_ave_nsm = self.pf_floss_nsm[self.nsm.FLOSS_DEV_AVE_NSM]
@@ -69,7 +69,7 @@ class TestNSM2(unittest.TestCase):
         floss_latest_beta_nsm = self.pf_floss_nsm[
             self.nsm.FLOSS_LATEST_BETA_NSM
         ]
-        self.assertAlmostEqual(floss_latest_beta_nsm, 0.88, places=2)
+        self.assertAlmostEqual(floss_latest_beta_nsm, 0.82, places=2)
 
     def test_platform_floss_latest_beta_build(self):
         build_name = self.pf_floss_nsm[self.nsm.FLOSS_LATEST_BETA_BUILD]
