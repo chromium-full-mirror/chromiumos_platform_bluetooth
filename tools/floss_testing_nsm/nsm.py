@@ -56,6 +56,7 @@ class NSM(object):
         "pass",
         "warn",
         "fail",
+        "nostatus",
         "testNa",
         "notRun",
         "other",
