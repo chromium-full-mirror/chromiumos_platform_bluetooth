@@ -75,6 +75,23 @@ class NSM(object):
         STAINLESS: TestInfoKey("row", "col", "pass", "fail"),
     }
 
+    # These tests are not valid in floss since floss does not support the
+    # corresponding features yet.
+    INVALID_TEST_LIST = [
+        # b/238234385
+        "bluetooth_AdapterAdvMonitor.advmon_multi_client_tests",
+        # b/238234386
+        "bluetooth_AdapterAdvMonitor.advmon_suspend_resume_tests",
+        # b/238210266
+        "bluetooth_AdapterAdvMonitor.advmon_interleaved_scan_tests",
+        # b/269327181
+        "bluetooth_AdapterSAHealth.sa_adapter_pairable_timeout_test",
+        # b/269301493
+        "bluetooth_AdapterSRHealth.sr_suspend_delay_while_receiving_bqr",
+        # b/238210265
+        "bluetooth_AdapterAdvMonitor.advmon_fg_bg_combination_tests",
+    ]
+
     # The (number of executed tests / number of floss tests) * 100 must be
     # greater than or equal to this percentage for a build to be valid.
     # To avoid considering a build that produces too few test results, we set a
@@ -181,6 +198,20 @@ class NSM(object):
         if test_name.startswith(prefix):
             test_name = test_name[len(prefix) :]
         return test_name
+
+    def exclude_tests(self, test_list):
+        """Excludes the tests that are not valid in Floss.
+
+        We exclude the tests that are not valid in Floss so that it is fair to
+        compare the test results of Floss to BlueZ.
+
+        Args:
+            test_list: the original list of test names
+
+        Returns:
+            A list of test names that excludes those invalid ones.
+        """
+        return sorted(set(test_list) - set(self.INVALID_TEST_LIST))
 
     def extract_test_list_from_csv(self, filepath):
         """Extracts a list of test names from a CSV file.
@@ -957,11 +988,10 @@ class NSM(object):
         floss_csv_filepath = self.floss_csv_filepath
         floss_test_list = self.extract_test_list_from_csv(floss_csv_filepath)
 
-        # For now, the only bluez build is the bluez golden build.
-        # All of the bluez tests are contained in denominator_test_list.
-        denominator_test_list = self.extract_test_list_from_csv(
-            bluez_csv_filepath
-        )
+        # For now, the only BlueZ build is the BlueZ golden build.
+        # All of the BlueZ tests are contained in denominator_test_list
+        # with the exception of those listed in INVALID_TEST_LIST.
+        denominator_test_list = self.exclude_tests(bluez_test_list)
         print(
             "Number of tests in the denominator: %d"
             % len(denominator_test_list)
