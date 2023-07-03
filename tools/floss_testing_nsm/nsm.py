@@ -754,8 +754,15 @@ class NSM(object):
             A dictionary of values about NSMs.
         """
         # Only one OSR value exists in bluez_valid_osrs representing
-        # the golden build, R108-15183.71.0, which is in the beta channel.
-        bluez_golden_osr = bluez_valid_osrs[self.BETA][0]
+        # the golden build. There are two possibilities.
+        # - R108-15183.71.0, which is in the beta channel.
+        # - R117-15526.0.0, which is in the dev channel.
+        if bluez_valid_osrs[self.BETA]:
+            bluez_golden_osr = bluez_valid_osrs[self.BETA][0]
+        elif bluez_valid_osrs[self.DEV]:
+            bluez_golden_osr = bluez_valid_osrs[self.DEV][0]
+        else:
+            self.abort("Failed to find valid OSRs.")
 
         floss_valid_osrs_dev = floss_valid_osrs[self.DEV]
         floss_valid_osrs_beta = floss_valid_osrs[self.BETA]
