@@ -90,6 +90,14 @@ class NSM(object):
         "bluetooth_AdapterSRHealth.sr_suspend_delay_while_receiving_bqr",
         # b/238210265
         "bluetooth_AdapterAdvMonitor.advmon_fg_bg_combination_tests",
+        # b/262455632
+        "bluetooth_AdapterAdvHealth.adv_reboot_advertising_test",
+        # b/262455632
+        "bluetooth_AdapterEPHealth.ep_check_set_allowlist",
+        # b/262455632
+        "bluetooth_AdapterLEBetterTogether.smart_unlock_test",
+        # b/262455632
+        "bluetooth_AdapterQRHealth.qr_check_states_test",
     ]
 
     # The (number of executed tests / number of floss tests) * 100 must be
