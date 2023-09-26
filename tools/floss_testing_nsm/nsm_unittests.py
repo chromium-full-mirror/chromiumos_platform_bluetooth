@@ -31,7 +31,7 @@ class TestNSM2(unittest.TestCase):
             bluez_osrs_result,
             floss_osrs_result,
             nsm_results,
-        ) = self.nsm.do_nsm2_command()
+        ) = self.nsm.process_nsm2_command()
 
         # Platform (pf) tests data
         pf_bluez_osrs = bluez_osrs_result[self.nsm.CATEGORY_PLATFORM]

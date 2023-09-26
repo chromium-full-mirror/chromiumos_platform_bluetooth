@@ -141,9 +141,32 @@ class NSM(object):
     FLOSS_LATEST_BETA_OSR = "floss_latest_beta_osr"
     BLUEZ_GOLDEN_OSR = "bluez_golden_osr"
 
-    def __init__(self, bluez_csv_filepath, floss_csv_filepath, verbose=False):
+    def __init__(
+        self,
+        bluez_csv_filepath,
+        floss_csv_filepath,
+        wave=None,
+        start=None,
+        end=None,
+        verbose=False,
+    ):
+        """The constructor for the NSM class.
+
+        Args:
+            bluez_csv_filepath: The path to the bluez CSV file.
+            floss_csv_filepath: The path to the floss CSV file.
+            wave: the wave of the devices;
+                possible values are 1, 2, 3 representing wave-1,
+                wave-2, and wave-3 devices respectively.
+          start: the start date for the test results
+          end: the end date for the test results
+          verbose: the flag to enable detailed logging messages.
+        """
         self.bluez_csv_filepath = bluez_csv_filepath
         self.floss_csv_filepath = floss_csv_filepath
+        self.wave = wave
+        self.start = start
+        self.end = end
         self.verbose = verbose
 
     @staticmethod
@@ -931,8 +954,8 @@ class NSM(object):
             f"(Number of builds: {num_builds:d}))\n"
         )
 
-    def do_nsm_command(self):
-        """Do the nsm command.
+    def process_nsm_command(self):
+        """Process the nsm command.
 
         This command calculates the NSM with the Floss OSR values and the
         Bluez OSR values.
@@ -990,8 +1013,11 @@ class NSM(object):
         )
         self.print_nsms(nsm_results)
 
-    def do_nsm2_command(self):
-        """Do the nsm2 command.
+    def process_nsm2_command_with_floss_file(self):
+        """Process the nsm2 command.
+
+        The floss csv file has been generated. Calculate the NSM values based
+        on the floss and the bluez csv files.
 
         This command separates the test list into two categories: platform and
         non-platform test lists. It then calculates the NSM values for both
@@ -1070,6 +1096,42 @@ class NSM(object):
 
         return bluez_osrs_result, floss_osrs_result, nsm_results
 
+    def retrieve_test_results_for_nsm2(self):
+        """Retrieve the test results for the nsm2 command argument.
+
+        This method uses a Big Query script to obtain the test results
+        corresponding to the 'nsm2' command argument.
+        """
+        from bq_cros_test import FlossTestResultRetriever
+
+        bq_obj = FlossTestResultRetriever(self.start, self.end)
+        self.floss_csv_filepath = bq_obj.query(self.wave)
+        print(f"Big Query test results are saved in {self.floss_csv_filepath}")
+
+    def process_nsm2_command(self):
+        """Process the nsm2 command.
+
+        There are two scenarios to compute the NSM values.
+
+        1. Download the test results from the biq query table, save the data
+           in a csv file, and then calculate the NSM values accordingly.
+
+        2. The floss csv data file has been generated, possibly through
+           the BigQuery Studio:
+           https://pantheon.corp.google.com/bigquery?project=cros-test-analytics&ws=!1m0
+           Calculate the NSM values from the floss csv file.
+        """
+        if self.wave and self.start and self.end:
+            self.retrieve_test_results_for_nsm2()
+            return self.process_nsm2_command_with_floss_file()
+        elif self.floss_csv_filepath:
+            return self.process_nsm2_command_with_floss_file()
+        else:
+            self.abort(
+                "You should either specify the floss csv filepath or "
+                "the wave, the start date, and the end date."
+            )
+
 
 def parse_args():
     """Parse the arguments."""
@@ -1122,6 +1184,24 @@ def parse_args():
         help="the floss csv filepath to calculate testing NSM",
     )
     nsm_parser.add_argument(
+        "-w",
+        "--wave",
+        type=str,
+        help="the wave of devices",
+    )
+    nsm_parser.add_argument(
+        "-s",
+        "--start",
+        type=str,
+        help="the start date of the test data to query, e.g., 2023-09-20",
+    )
+    nsm_parser.add_argument(
+        "-e",
+        "--end",
+        type=str,
+        help="the end date of the test data to query, e.g., 2023-09-26",
+    )
+    nsm_parser.add_argument(
         "-v", "--verbose", action="store_true", help="enable verbose mode"
     )
 
@@ -1131,11 +1211,13 @@ def parse_args():
 def main():
     """The main function to execute the commands supported by this module."""
     args = parse_args()
-    nsm = NSM(args.bluez, args.floss, args.verbose)
+    nsm = NSM(
+        args.bluez, args.floss, args.wave, args.start, args.end, args.verbose
+    )
     if args.command == "nsm":
-        nsm.do_nsm_command()
+        nsm.process_nsm_command()
     elif args.command == "nsm2":
-        nsm.do_nsm2_command()
+        nsm.process_nsm2_command()
 
 
 if __name__ == "__main__":
