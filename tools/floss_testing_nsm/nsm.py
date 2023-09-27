@@ -1112,6 +1112,7 @@ def parse_args():
         "-b",
         "--bluez",
         type=str,
+        default="data/Bluez_osr_R117-15526.0.0.csv",
         help="the bluez csv filepath to calculate testing NSM",
     )
     nsm_parser.add_argument(
