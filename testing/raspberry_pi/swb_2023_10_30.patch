@@ -1,0 +1,1267 @@
+diff --git a/spa/include/spa/param/bluetooth/audio.h b/spa/include/spa/param/bluetooth/audio.h
+index 68c6b9f22..39c79c484 100644
+--- a/spa/include/spa/param/bluetooth/audio.h
++++ b/spa/include/spa/param/bluetooth/audio.h
+@@ -38,6 +38,7 @@ enum spa_bluetooth_audio_codec {
+ 	/* HFP */
+ 	SPA_BLUETOOTH_AUDIO_CODEC_CVSD = 0x100,
+ 	SPA_BLUETOOTH_AUDIO_CODEC_MSBC,
++	SPA_BLUETOOTH_AUDIO_CODEC_SWBLC3,
+ 
+ 	/* BAP */
+ 	SPA_BLUETOOTH_AUDIO_CODEC_LC3 = 0x200,
+diff --git a/spa/include/spa/param/bluetooth/type-info.h b/spa/include/spa/param/bluetooth/type-info.h
+index 6b166fde6..54717f899 100644
+--- a/spa/include/spa/param/bluetooth/type-info.h
++++ b/spa/include/spa/param/bluetooth/type-info.h
+@@ -41,6 +41,7 @@ static const struct spa_type_info spa_type_bluetooth_audio_codec[] = {
+ 
+ 	{ SPA_BLUETOOTH_AUDIO_CODEC_CVSD, SPA_TYPE_Int, SPA_TYPE_INFO_BLUETOOTH_AUDIO_CODEC_BASE "cvsd", NULL },
+ 	{ SPA_BLUETOOTH_AUDIO_CODEC_MSBC, SPA_TYPE_Int, SPA_TYPE_INFO_BLUETOOTH_AUDIO_CODEC_BASE "msbc", NULL },
++	{ SPA_BLUETOOTH_AUDIO_CODEC_SWBLC3, SPA_TYPE_Int, SPA_TYPE_INFO_BLUETOOTH_AUDIO_CODEC_BASE "swblc3", NULL },
+ 
+ 	{ SPA_BLUETOOTH_AUDIO_CODEC_LC3, SPA_TYPE_Int, SPA_TYPE_INFO_BLUETOOTH_AUDIO_CODEC_BASE "lc3", NULL },
+ 
+diff --git a/spa/plugins/bluez5/backend-native.c b/spa/plugins/bluez5/backend-native.c
+index 2e81adf3a..d644e6c4a 100644
+--- a/spa/plugins/bluez5/backend-native.c
++++ b/spa/plugins/bluez5/backend-native.c
+@@ -161,6 +161,7 @@ struct rfcomm {
+ 	unsigned int slc_configured:1;
+ 	unsigned int codec_negotiation_supported:1;
+ 	unsigned int msbc_supported_by_hfp:1;
++	unsigned int lc3_supported_by_hfp:1;
+ 	unsigned int hfp_ag_switching_codec:1;
+ 	unsigned int hfp_ag_initial_codec_setup:2;
+ 	unsigned int cind_call_active:1;
+@@ -638,7 +639,7 @@ static bool device_supports_required_mSBC_transport_modes(
+ 	if (!msbc_ok && !msbc_alt1_ok)
+ 		return false;
+ 
+-	res = spa_bt_adapter_has_msbc(device->adapter);
++	res = spa_bt_adapter_supports_transparent_airmode(device->adapter);
+ 	if (res < 0) {
+ 		spa_log_warn(backend->log,
+ 				"adapter %s: failed to determine msbc/esco capability (%d)",
+@@ -677,6 +678,17 @@ static bool device_supports_required_mSBC_transport_modes(
+ 	return msbc_ok || msbc_alt1_ok;
+ }
+ 
++// Note that SWB is supported iff mSBC over transparent air mode is supported.
++static bool is_hfp_swb_enabled(struct impl *backend)
++{
++	uint32_t bt_features;
++
++	if (backend->quirks && spa_bt_quirks_get_features(backend->quirks, NULL, NULL, &bt_features) == 0)
++		return bt_features & SPA_BT_FEATURE_HFP_SWB;
++
++	return true;
++}
++
+ static int codec_switch_start_timer(struct rfcomm *rfcomm, int timeout_msec);
+ 
+ static void process_xevent_indicator(struct rfcomm *rfcomm, unsigned int level, unsigned int nlevels)
+@@ -792,8 +804,10 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 		 */
+ 		rfcomm->has_volume = (features & SPA_BT_HFP_HF_FEATURE_REMOTE_VOLUME_CONTROL);
+ 
+-		/* Decide if we want to signal that the computer supports mSBC negotiation
+-		   This should be done when the computers bluetooth adapter supports the necessary transport mode */
++		/* Decide if we want to signal that the computer supports codec negotiation.
++		 * This should be done when the computers bluetooth adapter supports the necessary transport mode.
++		 * Note that LC3 runs on the same transport mode as mSBC.
++		 */
+ 		if (device_supports_required_mSBC_transport_modes(backend, rfcomm->device)) {
+ 
+ 			/* set the feature bit that indicates AG (=computer) supports codec negotiation */
+@@ -807,6 +821,7 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 				/* Prepare reply: Audio Gateway (=computer) supports codec negotiation */
+ 				rfcomm->codec_negotiation_supported = true;
+ 				rfcomm->msbc_supported_by_hfp = false;
++				rfcomm->lc3_supported_by_hfp = false;
+ 			} else {
+ 				/* Codec negotiation not supported */
+ 				spa_log_debug(backend->log,
+@@ -815,6 +830,7 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 
+ 				rfcomm->codec_negotiation_supported = false;
+ 				rfcomm->msbc_supported_by_hfp = false;
++				rfcomm->lc3_supported_by_hfp = false;
+ 			}
+ 		}
+ 
+@@ -840,6 +856,9 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 				if (codec_id == HFP_AUDIO_CODEC_MSBC) {
+ 					rfcomm->msbc_supported_by_hfp = true;
+ 					spa_log_debug(backend->log, "RFCOMM headset supports mSBC codec");
++				} else if (codec_id == HFP_AUDIO_CODEC_LC3) {
++					rfcomm->lc3_supported_by_hfp = true;
++					spa_log_debug(backend->log, "RFCOMM headset supports LC3 codec");
+ 				}
+ 			}
+ 			cntr++;
+@@ -866,11 +885,15 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 		else
+ 			rfcomm->cind_call_notify = false;
+ 
+-		/* switch codec to mSBC by sending unsolicited +BCS message */
+-		if (rfcomm->codec_negotiation_supported && rfcomm->msbc_supported_by_hfp) {
++		/* switch codec to mSBC/LC3 by sending unsolicited +BCS message */
++		if (rfcomm->codec_negotiation_supported &&
++				(rfcomm->msbc_supported_by_hfp || rfcomm->lc3_supported_by_hfp)) {
++			unsigned int codec_id =
++				rfcomm->lc3_supported_by_hfp ? HFP_AUDIO_CODEC_LC3
++				                             : HFP_AUDIO_CODEC_MSBC;
+ 			spa_log_debug(backend->log, "RFCOMM initial codec setup");
+ 			rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_SEND;
+-			rfcomm_send_reply(rfcomm, "+BCS: 2");
++			rfcomm_send_reply(rfcomm, "+BCS: %d", codec_id);
+ 			codec_switch_start_timer(rfcomm, HFP_CODEC_SWITCH_INITIAL_TIMEOUT_MSEC);
+ 		} else {
+ 			rfcomm->transport = _transport_create(rfcomm);
+@@ -903,7 +926,9 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ 		codec_switch_stop_timer(rfcomm);
+ 		volume_sync_stop_timer(rfcomm);
+ 
+-		if (selected_codec != HFP_AUDIO_CODEC_CVSD && selected_codec != HFP_AUDIO_CODEC_MSBC) {
++		if (selected_codec != HFP_AUDIO_CODEC_CVSD &&
++				selected_codec != HFP_AUDIO_CODEC_MSBC &&
++				selected_codec != HFP_AUDIO_CODEC_LC3) {
+ 			spa_log_warn(backend->log, "unsupported codec negotiation: %d", selected_codec);
+ 			rfcomm_send_error(rfcomm, CMEE_AG_FAILURE);
+ 			if (was_switching_codec)
+@@ -1186,10 +1211,12 @@ static bool rfcomm_hfp_hf(struct rfcomm *rfcomm, char* buf)
+ 	while ((token = strsep(&buf, "\r\n"))) {
+ 		if (sscanf(token, "+BRSF:%u", &features) == 1) {
+ 			if (((features & (SPA_BT_HFP_AG_FEATURE_CODEC_NEGOTIATION)) != 0) &&
+-			    rfcomm->msbc_supported_by_hfp)
++			    (rfcomm->msbc_supported_by_hfp || rfcomm->lc3_supported_by_hfp))
+ 				rfcomm->codec_negotiation_supported = true;
+ 		} else if (sscanf(token, "+BCS:%u", &selected_codec) == 1 && rfcomm->codec_negotiation_supported) {
+-			if (selected_codec != HFP_AUDIO_CODEC_CVSD && selected_codec != HFP_AUDIO_CODEC_MSBC) {
++			if (selected_codec != HFP_AUDIO_CODEC_CVSD &&
++			    selected_codec != HFP_AUDIO_CODEC_MSBC &&
++			    selected_codec != HFP_AUDIO_CODEC_LC3) {
+ 				spa_log_warn(backend->log, "unsupported codec negotiation: %d", selected_codec);
+ 			} else {
+ 				spa_log_debug(backend->log, "RFCOMM selected_codec = %i", selected_codec);
+@@ -1270,7 +1297,7 @@ static bool rfcomm_hfp_hf(struct rfcomm *rfcomm, char* buf)
+ 			switch(rfcomm->hf_state) {
+ 				case hfp_hf_brsf:
+ 					if (rfcomm->codec_negotiation_supported) {
+-						rfcomm_send_cmd(rfcomm, "AT+BAC=1,2");
++						rfcomm_send_cmd(rfcomm, "AT+BAC=1,2,3");
+ 						rfcomm->hf_state = hfp_hf_bac;
+ 					} else {
+ 						rfcomm_send_cmd(rfcomm, "AT+CIND=?");
+@@ -1378,7 +1405,7 @@ static void rfcomm_event(struct spa_source *source)
+ 	}
+ }
+ 
+-static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapter, bool msbc)
++static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapter, bool transparent_airmode)
+ {
+ 	struct sockaddr_sco addr;
+ 	socklen_t len;
+@@ -1402,9 +1429,9 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
+ 		return -1;
+ 	}
+ 
+-	spa_log_debug(backend->log, "msbc=%d", (int)msbc);
+-	if (msbc) {
+-		/* set correct socket options for mSBC */
++	spa_log_debug(backend->log, "transparent_airmode=%d", (int)transparent_airmode);
++	if (transparent_airmode) {
++		/* set correct socket options for transparent_airmode */
+ 		struct bt_voice voice_config;
+ 		memset(&voice_config, 0, sizeof(voice_config));
+ 		voice_config.setting = BT_VOICE_TRANSPARENT;
+@@ -1438,7 +1465,11 @@ static int sco_do_connect(struct spa_bt_transport *t)
+ 	str2ba(d->address, &addr.sco_bdaddr);
+ 
+ 	for (int retry = 2;;) {
+-		spa_autoclose int sock = sco_create_socket(backend, d->adapter, (t->codec == HFP_AUDIO_CODEC_MSBC));
++		bool transparent_airmode = t->codec == HFP_AUDIO_CODEC_MSBC ||
++															 t->codec == HFP_AUDIO_CODEC_LC3;
++
++		spa_autoclose int sock = sco_create_socket(
++				backend, d->adapter, transparent_airmode);
+ 		if (sock < 0)
+ 			return -1;
+ 
+@@ -1451,12 +1482,14 @@ static int sco_do_connect(struct spa_bt_transport *t)
+ 		} else if (err < 0 && !(errno == EAGAIN || errno == EINPROGRESS)) {
+ 			spa_log_error(backend->log, "connect(): %s", strerror(errno));
+ #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
+-			if (errno == EOPNOTSUPP && t->codec == HFP_AUDIO_CODEC_MSBC &&
+-					td->rfcomm->msbc_supported_by_hfp) {
+-				/* Adapter doesn't support msbc. Renegotiate. */
+-				d->adapter->msbc_probed = true;
+-				d->adapter->has_msbc = false;
++			if (errno == EOPNOTSUPP &&
++			    ((t->codec == HFP_AUDIO_CODEC_MSBC && td->rfcomm->msbc_supported_by_hfp) ||
++			     (t->codec == HFP_AUDIO_CODEC_LC3 && td->rfcomm->lc3_supported_by_hfp))) {
++				/* Adapter doesn't support transparent air mode. Renegotiate. */
++				d->adapter->transparent_airmode_probed = true;
++				d->adapter->transparent_airmode_supported = false;
+ 				td->rfcomm->msbc_supported_by_hfp = false;
++				td->rfcomm->lc3_supported_by_hfp = false;
+ 				if (t->profile == SPA_BT_PROFILE_HFP_HF) {
+ 					td->rfcomm->hfp_ag_switching_codec = true;
+ 					rfcomm_send_reply(td->rfcomm, "+BCS: 1");
+@@ -1767,8 +1800,8 @@ static void sco_listen_event(struct spa_source *source)
+ 		 * accepted socket. */
+ 		char buff;
+ 
+-		if (t->codec == HFP_AUDIO_CODEC_MSBC) {
+-			/* set correct socket options for mSBC */
++		if (t->codec == HFP_AUDIO_CODEC_MSBC || t->codec == HFP_AUDIO_CODEC_LC3) {
++			/* set correct socket options for mSBC/LC3 */
+ 			struct bt_voice voice_config;
+ 			memset(&voice_config, 0, sizeof(voice_config));
+ 			voice_config.setting = BT_VOICE_TRANSPARENT;
+@@ -1935,14 +1968,26 @@ static int backend_native_supports_codec(void *data, struct spa_bt_device *devic
+ 	if (rfcomm == NULL || rfcomm->profile != SPA_BT_PROFILE_HFP_HF)
+ 		return -ENOTSUP;
+ 
+-	if (codec == HFP_AUDIO_CODEC_CVSD)
+-		return 1;
++	switch (codec) {
++		case HFP_AUDIO_CODEC_CVSD:
++			return 1;
++
++		case HFP_AUDIO_CODEC_MSBC:
++			return ((rfcomm->profile == SPA_BT_PROFILE_HFP_AG ||
++			         rfcomm->profile == SPA_BT_PROFILE_HFP_HF) &&
++			        rfcomm->msbc_supported_by_hfp &&
++			        rfcomm->codec_negotiation_supported) ? 1 : 0;
++
++		case HFP_AUDIO_CODEC_LC3:
++			return ((rfcomm->profile == SPA_BT_PROFILE_HFP_AG ||
++			         rfcomm->profile == SPA_BT_PROFILE_HFP_HF) &&
++			        rfcomm->lc3_supported_by_hfp &&
++			        rfcomm->codec_negotiation_supported) ? 1 : 0;
++
++		default:
++			return -ENOTSUP;
++	}
+ 
+-	return (codec == HFP_AUDIO_CODEC_MSBC &&
+-	        (rfcomm->profile == SPA_BT_PROFILE_HFP_AG ||
+-	         rfcomm->profile == SPA_BT_PROFILE_HFP_HF) &&
+-	        rfcomm->msbc_supported_by_hfp &&
+-	        rfcomm->codec_negotiation_supported) ? 1 : 0;
+ #else
+ 	return -ENOTSUP;
+ #endif
+@@ -2242,14 +2287,19 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
+ 		/* Start SLC connection */
+ 		unsigned int hf_features = SPA_BT_HFP_HF_FEATURE_NONE;
+ 
+-		/* Decide if we want to signal that the HF supports mSBC negotiation
+-		   This should be done when the bluetooth adapter supports the necessary transport mode */
++		/* Decide if we want to signal that the computer supports codec negotiation.
++		 * This should be done when the computers bluetooth adapter supports the necessary transport mode.
++		 * Note that LC3 runs on the same transport mode as mSBC.
++		 */
+ 		if (device_supports_required_mSBC_transport_modes(backend, rfcomm->device)) {
+ 			/* set the feature bit that indicates HF supports codec negotiation */
+ 			hf_features |= SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION;
++
++			rfcomm->lc3_supported_by_hfp = is_hfp_swb_enabled(backend);
+ 			rfcomm->msbc_supported_by_hfp = true;
+ 			rfcomm->codec_negotiation_supported = false;
+ 		} else {
++			rfcomm->lc3_supported_by_hfp = false;
+ 			rfcomm->msbc_supported_by_hfp = false;
+ 			rfcomm->codec_negotiation_supported = false;
+ 		}
+@@ -2452,6 +2502,10 @@ static int register_profile(struct impl *backend, const char *profile, const cha
+ 
+ 		/* We announce wideband speech support anyway */
+ 		features = SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH;
++
++		if (is_hfp_swb_enabled(backend))
++			features |= SPA_BT_HFP_SDP_AG_FEATURE_SUPERWIDEBAND_SPEECH;
++
+ 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
+ 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
+ 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
+@@ -2459,9 +2513,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
+ 		dbus_message_iter_close_container(&it[2], &it[3]);
+ 		dbus_message_iter_close_container(&it[1], &it[2]);
+ 
+-		/* HFP version 1.7 */
++		/* HFP version 1.9 */
+ 		str = "Version";
+-		version = 0x0107;
++		version = 0x0109;
+ 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
+ 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
+ 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
+@@ -2473,6 +2527,10 @@ static int register_profile(struct impl *backend, const char *profile, const cha
+ 
+ 		/* We announce wideband speech support anyway */
+ 		features = SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH;
++
++		if (is_hfp_swb_enabled(backend))
++			features |= SPA_BT_HFP_SDP_HF_FEATURE_SUPERWIDEBAND_SPEECH;
++
+ 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
+ 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
+ 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
+@@ -2480,9 +2538,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
+ 		dbus_message_iter_close_container(&it[2], &it[3]);
+ 		dbus_message_iter_close_container(&it[1], &it[2]);
+ 
+-		/* HFP version 1.7 */
++		/* HFP version 1.9 */
+ 		str = "Version";
+-		version = 0x0107;
++		version = 0x0109;
+ 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
+ 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
+ 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
+diff --git a/spa/plugins/bluez5/backend-ofono.c b/spa/plugins/bluez5/backend-ofono.c
+index 76c9dfe75..90bba5031 100644
+--- a/spa/plugins/bluez5/backend-ofono.c
++++ b/spa/plugins/bluez5/backend-ofono.c
+@@ -6,6 +6,8 @@
+ #include <unistd.h>
+ #include <poll.h>
+ #include <sys/socket.h>
++#include <time.h>
++#include <sys/time.h>
+ 
+ #include <bluetooth/bluetooth.h>
+ #include <bluetooth/sco.h>
+@@ -49,6 +51,7 @@ struct impl {
+ 
+ 	unsigned int filters_added:1;
+ 	unsigned int msbc_supported:1;
++	unsigned int lc3_supported:1;
+ };
+ 
+ struct transport_data {
+@@ -364,8 +367,13 @@ static DBusHandlerResult ofono_audio_card_found(struct impl *backend, char *path
+ 	struct spa_bt_transport *t;
+ 	struct transport_data *td;
+ 	enum spa_bt_profile profile = SPA_BT_PROFILE_HFP_AG;
+-	uint8_t codec = backend->msbc_supported ?
+-		HFP_AUDIO_CODEC_MSBC : HFP_AUDIO_CODEC_CVSD;
++
++	uint8_t codec = HFP_AUDIO_CODEC_CVSD;
++	if (backend->lc3_supported) {
++		codec = HFP_AUDIO_CODEC_LC3;
++	} else if (backend->msbc_supported) {
++		codec = HFP_AUDIO_CODEC_MSBC;
++	}
+ 
+ 	spa_assert(backend);
+ 	spa_assert(path);
+@@ -649,7 +657,7 @@ static int ofono_register(struct impl *backend)
+ {
+ 	spa_autoptr(DBusMessage) m = NULL, r = NULL;
+ 	const char *path = OFONO_AUDIO_CLIENT;
+-	uint8_t codecs[2];
++	uint8_t codecs[3];
+ 	const uint8_t *pcodecs = codecs;
+ 	int ncodecs = 0;
+ 	spa_auto(DBusError) err = DBUS_ERROR_INIT;
+@@ -664,6 +672,8 @@ static int ofono_register(struct impl *backend)
+ 	codecs[ncodecs++] = HFP_AUDIO_CODEC_CVSD;
+ 	if (backend->msbc_supported)
+ 		codecs[ncodecs++] = HFP_AUDIO_CODEC_MSBC;
++	if (backend->lc3_supported)
++		codecs[ncodecs++] = HFP_AUDIO_CODEC_LC3;
+ 
+ 	dbus_message_append_args(m, DBUS_TYPE_OBJECT_PATH, &path,
+                                           DBUS_TYPE_ARRAY, DBUS_TYPE_BYTE, &pcodecs, ncodecs,
+@@ -873,6 +883,10 @@ struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
+ 		backend->msbc_supported = spa_atob(str);
+ 	else
+ 		backend->msbc_supported = false;
++	if (info && (str = spa_dict_lookup(info, "bluez5.enable-hfp-swb")))
++		backend->lc3_supported = spa_atob(str);
++	else
++		backend->lc3_supported = false;
+ 
+ 	spa_log_topic_init(backend->log, &log_topic);
+ 
+diff --git a/spa/plugins/bluez5/bluez-hardware.conf b/spa/plugins/bluez5/bluez-hardware.conf
+index 3dcd5f962..4e819358d 100644
+--- a/spa/plugins/bluez5/bluez-hardware.conf
++++ b/spa/plugins/bluez5/bluez-hardware.conf
+@@ -15,6 +15,7 @@
+ #     sbc-xq            "nonstandard" SBC codec setting with better sound quality
+ #     faststream        FastStream codec support
+ #     a2dp-duplex       A2DP duplex codec support
++#     hfp-swb           HFP Super-wide-band-speech support (nop if msbc unsupported)
+ #
+ # Features are disabled with the key "no-features" whose value is an
+ # array of strings in the match rule.
+diff --git a/spa/plugins/bluez5/bluez5-device.c b/spa/plugins/bluez5/bluez5-device.c
+index bb7db13a5..c9c3bc604 100644
+--- a/spa/plugins/bluez5/bluez5-device.c
++++ b/spa/plugins/bluez5/bluez5-device.c
+@@ -9,6 +9,8 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <errno.h>
++#include <time.h>
++#include <sys/time.h>
+ 
+ #include <spa/support/log.h>
+ #include <spa/utils/type.h>
+@@ -238,6 +240,8 @@ static unsigned int get_hfp_codec(enum spa_bluetooth_audio_codec id)
+ 		return HFP_AUDIO_CODEC_CVSD;
+ 	case SPA_BLUETOOTH_AUDIO_CODEC_MSBC:
+ 		return HFP_AUDIO_CODEC_MSBC;
++	case SPA_BLUETOOTH_AUDIO_CODEC_SWBLC3:
++		return HFP_AUDIO_CODEC_LC3;
+ 	default:
+ 		return 0;
+ 	}
+@@ -246,6 +250,8 @@ static unsigned int get_hfp_codec(enum spa_bluetooth_audio_codec id)
+ static enum spa_bluetooth_audio_codec get_hfp_codec_id(unsigned int codec)
+ {
+ 	switch (codec) {
++	case HFP_AUDIO_CODEC_LC3:
++		return SPA_BLUETOOTH_AUDIO_CODEC_SWBLC3;
+ 	case HFP_AUDIO_CODEC_MSBC:
+ 		return SPA_BLUETOOTH_AUDIO_CODEC_MSBC;
+ 	case HFP_AUDIO_CODEC_CVSD:
+@@ -257,6 +263,8 @@ static enum spa_bluetooth_audio_codec get_hfp_codec_id(unsigned int codec)
+ static const char *get_hfp_codec_description(unsigned int codec)
+ {
+ 	switch (codec) {
++	case HFP_AUDIO_CODEC_LC3:
++		return "LC3";
+ 	case HFP_AUDIO_CODEC_MSBC:
+ 		return "mSBC";
+ 	case HFP_AUDIO_CODEC_CVSD:
+@@ -268,6 +276,8 @@ static const char *get_hfp_codec_description(unsigned int codec)
+ static const char *get_hfp_codec_name(unsigned int codec)
+ {
+ 	switch (codec) {
++	case HFP_AUDIO_CODEC_LC3:
++		return "lc3";
+ 	case HFP_AUDIO_CODEC_MSBC:
+ 		return "msbc";
+ 	case HFP_AUDIO_CODEC_CVSD:
+@@ -1735,7 +1745,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
+ 			desc_and_codec = spa_aprintf(_("Headset Head Unit (HSP/HFP, codec %s)"),
+ 						get_hfp_codec_description(hfp_codec));
+ 			desc = desc_and_codec;
+-			priority = 1 + hfp_codec;  /* prefer msbc over cvsd */
++			priority = 1 + hfp_codec;  /* lc3 > msbc > cvsd */
+ 		} else {
+ 			desc = _("Headset Head Unit (HSP/HFP)");
+ 			priority = 1;
+@@ -2093,7 +2103,7 @@ static struct spa_pod *build_prop_info_codec(struct impl *this, struct spa_pod_b
+ #define FOR_EACH_MEDIA_CODEC(j, codec) \
+ 		for (j = -1; iterate_supported_media_codecs(this, &j, &codec);)
+ #define FOR_EACH_HFP_CODEC(j) \
+-		for (j = HFP_AUDIO_CODEC_MSBC; j >= HFP_AUDIO_CODEC_CVSD; --j) \
++		for (j = HFP_AUDIO_CODEC_LC3; j >= HFP_AUDIO_CODEC_CVSD; --j) \
+ 			if (spa_bt_device_supports_hfp_codec(this->bt_dev, j) == 1)
+ 
+ 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_PropInfo, id);
+@@ -2576,6 +2586,9 @@ static int impl_set_param(void *object,
+ 			} else if (codec_id == SPA_BLUETOOTH_AUDIO_CODEC_MSBC &&
+ 					spa_bt_device_supports_hfp_codec(this->bt_dev, HFP_AUDIO_CODEC_MSBC) == 1) {
+ 				return set_profile(this, this->profile, codec_id, true);
++			} else if (codec_id == SPA_BLUETOOTH_AUDIO_CODEC_SWBLC3 &&
++					spa_bt_device_supports_hfp_codec(this->bt_dev, HFP_AUDIO_CODEC_LC3) == 1) {
++				return set_profile(this, this->profile, codec_id, true);
+ 			}
+ 		}
+ 		return -EINVAL;
+diff --git a/spa/plugins/bluez5/defs.h b/spa/plugins/bluez5/defs.h
+index 0f7ac95cb..e2808add0 100644
+--- a/spa/plugins/bluez5/defs.h
++++ b/spa/plugins/bluez5/defs.h
+@@ -141,6 +141,7 @@ extern "C" {
+ 
+ #define HFP_AUDIO_CODEC_CVSD    0x01
+ #define HFP_AUDIO_CODEC_MSBC    0x02
++#define HFP_AUDIO_CODEC_LC3     0x03
+ 
+ #define A2DP_OBJECT_MANAGER_PATH "/MediaEndpoint"
+ #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
+@@ -154,11 +155,15 @@ extern "C" {
+ 
+ #define SPA_BT_NO_BATTERY			((uint8_t)255)
+ 
+-/* HFP uses SBC encoding with precisely defined parameters. Hence, the size
++/* WBS uses SBC encoding with precisely defined parameters. Hence, the size
+  * of the input (number of PCM samples) and output is known up front. */
+-#define MSBC_DECODED_SIZE       240
+-#define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
+-#define MSBC_PAYLOAD_SIZE       57
++#define WBS_DECODED_SIZE       240
++#define WBS_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
++#define WBS_PAYLOAD_SIZE       57
++
++#define SWB_DECODED_SIZE       480
++#define SWB_ENCODED_SIZE       60  /* 2 bytes header + 58 LC3 payload */
++#define SWB_PAYLOAD_SIZE       58
+ 
+ enum spa_bt_media_direction {
+ 	SPA_BT_MEDIA_SOURCE,
+@@ -239,6 +244,9 @@ enum spa_bt_hfp_sdp_ag_features {
+ 	SPA_BT_HFP_SDP_AG_FEATURE_IN_BAND_RING_TONE =	(1 << 3),
+ 	SPA_BT_HFP_SDP_AG_FEATURE_ATTACH_VOICE_TAG =	(1 << 4),
+ 	SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
++	SPA_BT_HFP_SDP_AG_FEATURE_ENHANCED_VOICE_RECOGNITION_STATUS =	(1 << 6),
++	SPA_BT_HFP_SDP_AG_FEATURE_VOICE_RECOGNITION_TEXT =	(1 << 7),
++	SPA_BT_HFP_SDP_AG_FEATURE_SUPERWIDEBAND_SPEECH =	(1 << 8),
+ };
+ 
+ enum spa_bt_hfp_hf_feature {
+@@ -286,6 +294,9 @@ enum spa_bt_hfp_sdp_hf_features {
+ 	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION =	(1 << 3),
+ 	SPA_BT_HFP_SDP_HF_FEATURE_REMOTE_VOLUME_CONTROL =	(1 << 4),
+ 	SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
++	SPA_BT_HFP_SDP_HF_FEATURE_ENHANCED_VOICE_RECOGNITION_STATUS =	(1 << 6),
++	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION_TEXT =	(1 << 7),
++	SPA_BT_HFP_SDP_HF_FEATURE_SUPERWIDEBAND_SPEECH =	(1 << 8),
+ };
+ 
+ static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
+@@ -338,8 +349,8 @@ struct spa_bt_adapter {
+ 	uint32_t bluetooth_class;
+ 	uint32_t profiles;
+ 	int powered;
+-	unsigned int has_msbc:1;
+-	unsigned int msbc_probed:1;
++	unsigned int transparent_airmode_supported:1;
++	unsigned int transparent_airmode_probed:1;
+ 	unsigned int legacy_endpoints_registered:1;
+ 	unsigned int a2dp_application_registered:1;
+ 	unsigned int bap_application_registered:1;
+@@ -735,6 +746,7 @@ enum spa_bt_feature {
+ 	SPA_BT_FEATURE_SBC_XQ		= (1 << 5),
+ 	SPA_BT_FEATURE_FASTSTREAM	= (1 << 6),
+ 	SPA_BT_FEATURE_A2DP_DUPLEX	= (1 << 7),
++	SPA_BT_FEATURE_HFP_SWB	= (1 << 8),
+ };
+ 
+ struct spa_bt_quirks;
+@@ -746,7 +758,7 @@ int spa_bt_quirks_get_features(const struct spa_bt_quirks *quirks,
+ 		uint32_t *features);
+ void spa_bt_quirks_destroy(struct spa_bt_quirks *quirks);
+ 
+-int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter);
++int spa_bt_adapter_supports_transparent_airmode(struct spa_bt_adapter *adapter);
+ 
+ struct spa_bt_backend_implementation {
+ #define SPA_VERSION_BT_BACKEND_IMPLEMENTATION	0
+diff --git a/spa/plugins/bluez5/hci.c b/spa/plugins/bluez5/hci.c
+index 9395a30e0..2e2e1b580 100644
+--- a/spa/plugins/bluez5/hci.c
++++ b/spa/plugins/bluez5/hci.c
+@@ -4,6 +4,8 @@
+ 
+ #include <errno.h>
+ #include <unistd.h>
++#include <time.h>
++#include <sys/time.h>
+ #include <stdarg.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -16,10 +18,10 @@
+ 
+ #ifndef HAVE_BLUEZ_5_HCI
+ 
+-int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter)
++int spa_bt_adapter_supports_transparent_airmode(struct spa_bt_adapter *adapter)
+ {
+-	if (adapter->msbc_probed)
+-		return adapter->has_msbc;
++	if (adapter->transparent_airmode_probed)
++		return adapter->transparent_airmode_supported;
+ 	return -EOPNOTSUPP;
+ }
+ 
+@@ -31,7 +33,7 @@ int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter)
+ 
+ #include <spa/utils/cleanup.h>
+ 
+-int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter)
++int spa_bt_adapter_supports_transparent_airmode(struct spa_bt_adapter *adapter)
+ {
+ 	int hci_id;
+ 	spa_autoclose int sock = -1;
+@@ -39,8 +41,8 @@ int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter)
+ 	struct sockaddr_hci a;
+ 	const char *str;
+ 
+-	if (adapter->msbc_probed)
+-		return adapter->has_msbc;
++	if (adapter->transparent_airmode_probed)
++		return adapter->transparent_airmode_supported;
+ 
+ 	str = strrchr(adapter->path, '/');  /* hciXX */
+ 	if (str == NULL || sscanf(str, "/hci%d", &hci_id) != 1 || hci_id < 0)
+@@ -59,9 +61,10 @@ int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter)
+ 	if (hci_read_local_ext_features(sock, 0, &max_page, features, 1000) < 0)
+ 		return -errno;
+ 
+-	adapter->msbc_probed = true;
+-	adapter->has_msbc = ((features[2] & LMP_TRSP_SCO) && (features[3] & LMP_ESCO)) ? 1 : 0;
+-	return adapter->has_msbc;
++	adapter->transparent_airmode_probed = true;
++	adapter->transparent_airmode_supported =
++	  ((features[2] & LMP_TRSP_SCO) && (features[3] & LMP_ESCO)) ? 1 : 0;
++	return adapter->transparent_airmode_supported;
+ }
+ 
+ #endif
+diff --git a/spa/plugins/bluez5/meson.build b/spa/plugins/bluez5/meson.build
+index 80493cfe6..8ec564a0c 100644
+--- a/spa/plugins/bluez5/meson.build
++++ b/spa/plugins/bluez5/meson.build
+@@ -48,6 +48,11 @@ bluez5_data = ['bluez-hardware.conf']
+ 
+ install_data(bluez5_data, install_dir : spa_datadir / 'bluez5')
+ 
++# for HFP SWB
++if get_option('bluez5-codec-lc3').allowed() and lc3_dep.found()
++  bluez5_deps += lc3_dep
++endif
++
+ if get_option('bluez5-backend-hsp-native').allowed() or get_option('bluez5-backend-hfp-native').allowed()
+   if libusb_dep.found()
+     bluez5_deps += libusb_dep
+diff --git a/spa/plugins/bluez5/quirks.c b/spa/plugins/bluez5/quirks.c
+index a5538d640..c239da736 100644
+--- a/spa/plugins/bluez5/quirks.c
++++ b/spa/plugins/bluez5/quirks.c
+@@ -10,6 +10,7 @@
+ #include <sys/stat.h>
+ #include <sys/socket.h>
+ #include <fcntl.h>
++#include <time.h>
+ #include <regex.h>
+ #include <limits.h>
+ #include <sys/utsname.h>
+@@ -17,6 +18,7 @@
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <unistd.h>
++#include <sys/time.h>
+ 
+ #include <bluetooth/bluetooth.h>
+ 
+@@ -51,6 +53,7 @@ struct spa_bt_quirks {
+ 	int force_sbc_xq;
+ 	int force_faststream;
+ 	int force_a2dp_duplex;
++	int force_hfp_swb;
+ 
+ 	char *device_rules;
+ 	char *adapter_rules;
+@@ -68,6 +71,7 @@ static enum spa_bt_feature parse_feature(const char *str)
+ 		{ "sbc-xq", SPA_BT_FEATURE_SBC_XQ },
+ 		{ "faststream", SPA_BT_FEATURE_FASTSTREAM },
+ 		{ "a2dp-duplex", SPA_BT_FEATURE_A2DP_DUPLEX },
++		{ "hfp-swb", SPA_BT_FEATURE_HFP_SWB },
+ 	};
+ 	SPA_FOR_EACH_ELEMENT_VAR(feature_keys, f) {
+ 		if (spa_streq(str, f->key))
+@@ -228,6 +232,7 @@ struct spa_bt_quirks *spa_bt_quirks_create(const struct spa_dict *info, struct s
+ 	this->force_hw_volume = parse_force_flag(info, "bluez5.enable-hw-volume");
+ 	this->force_faststream = parse_force_flag(info, "bluez5.enable-faststream");
+ 	this->force_a2dp_duplex = parse_force_flag(info, "bluez5.enable-a2dp-duplex");
++	this->force_hfp_swb = parse_force_flag(info, "bluez5.enable-hfp-swb");
+ 
+ 	if ((str = spa_dict_lookup(info, "bluez5.hardware-database")) != NULL) {
+ 		spa_log_debug(this->log, "loading session manager provided data");
+@@ -377,5 +382,8 @@ int spa_bt_quirks_get_features(const struct spa_bt_quirks *this,
+ 	if (this->force_a2dp_duplex != -1)
+ 		SPA_FLAG_UPDATE(*features, SPA_BT_FEATURE_A2DP_DUPLEX, this->force_a2dp_duplex);
+ 
++	if (this->force_hfp_swb != -1)
++		SPA_FLAG_UPDATE(*features, SPA_BT_FEATURE_HFP_SWB, this->force_hfp_swb);
++
+ 	return 0;
+ }
+diff --git a/spa/plugins/bluez5/sco-sink.c b/spa/plugins/bluez5/sco-sink.c
+index 133b81821..b0e3f5d22 100644
+--- a/spa/plugins/bluez5/sco-sink.c
++++ b/spa/plugins/bluez5/sco-sink.c
+@@ -6,7 +6,9 @@
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <arpa/inet.h>
++#include <time.h>
+ #include <sys/ioctl.h>
++#include <sys/time.h>
+ 
+ #include <spa/support/plugin.h>
+ #include <spa/support/loop.h>
+@@ -29,6 +31,7 @@
+ #include <spa/param/audio/format-utils.h>
+ #include <spa/pod/filter.h>
+ 
++#include <lc3.h>
+ #include <sbc/sbc.h>
+ 
+ #include "defs.h"
+@@ -137,13 +140,18 @@ struct impl {
+ 	uint64_t prev_flush_time;
+ 	uint64_t next_flush_time;
+ 
+-	/* mSBC */
+-	sbc_t msbc;
++	/* WBS/SWB */
+ 	uint8_t *buffer;
+ 	uint8_t *buffer_head;
+ 	uint8_t *buffer_next;
+ 	int buffer_size;
+-	int msbc_seq;
++	int seq_num;
++
++	/* WBS */
++	sbc_t msbc;
++
++	/* SWB */
++	lc3_encoder_t lc3;
+ };
+ 
+ #define CHECK_PORT(this,d,p)	((d) == SPA_DIRECTION_INPUT && (p) == 0)
+@@ -373,11 +381,21 @@ static int flush_data(struct impl *this)
+ 	if (this->transport == NULL || this->transport->sco_io == NULL || !this->flush_timer_source.loop)
+ 		return -EIO;
+ 
+-	const uint32_t min_in_size =
+-		(this->transport->codec == HFP_AUDIO_CODEC_MSBC) ?
+-		MSBC_DECODED_SIZE : this->transport->write_mtu;
++	uint32_t min_in_size;
++	switch (this->transport->codec) {
++		case HFP_AUDIO_CODEC_LC3:
++			min_in_size = SWB_DECODED_SIZE;
++			break;
++		case HFP_AUDIO_CODEC_MSBC:
++			min_in_size = WBS_DECODED_SIZE;
++			break;
++		default:
++			min_in_size = this->transport->write_mtu;
++	}
++
+ 	uint8_t * const packet =
+-		(this->transport->codec == HFP_AUDIO_CODEC_MSBC) ?
++		(this->transport->codec == HFP_AUDIO_CODEC_MSBC ||
++		 this->transport->codec == HFP_AUDIO_CODEC_LC3) ?
+ 		this->buffer_head : port->write_buffer;
+ 	const uint32_t packet_samples = min_in_size / port->frame_size;
+ 	const uint64_t packet_time = (uint64_t)packet_samples * SPA_NSEC_PER_SEC
+@@ -433,26 +451,42 @@ static int flush_data(struct impl *this)
+ 		return 0;
+ 	}
+ 
+-	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
++	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC ||
++		  this->transport->codec == HFP_AUDIO_CODEC_LC3) {
+ 		ssize_t out_encoded;
+ 
++		const bool is_swb = this->transport->codec == HFP_AUDIO_CODEC_LC3;
++
+ 		/* Encode */
+-		if (this->buffer_next + MSBC_ENCODED_SIZE > this->buffer + this->buffer_size) {
++		if (this->buffer_next + min_in_size > this->buffer + this->buffer_size) {
+ 			/* Buffer overrun; shouldn't usually happen. Drop data and reset. */
+ 			this->buffer_head = this->buffer_next = this->buffer;
+-			spa_log_warn(this->log, "sco-sink: mSBC buffer overrun, dropping data");
++			spa_log_warn(this->log, "sco-sink: %s buffer overrun, dropping data", is_swb ? "SWB" : "WBS");
+ 		}
+ 		this->buffer_next[0] = 0x01;
+-		this->buffer_next[1] = sntable[this->msbc_seq % 4];
+-		this->buffer_next[59] = 0x00;
+-		this->msbc_seq = (this->msbc_seq + 1) % 4;
+-		processed = sbc_encode(&this->msbc, port->write_buffer, port->write_buffer_size,
+-				this->buffer_next + 2, MSBC_ENCODED_SIZE - 3, &out_encoded);
++		this->buffer_next[1] = sntable[this->seq_num % 4];
++		this->seq_num = (this->seq_num + 1) % 4;
++
++		if (is_swb) {
++			processed = lc3_encode(this->lc3, LC3_PCM_FORMAT_S16,
++					port->write_buffer, 1, SWB_PAYLOAD_SIZE, this->buffer_next + 2);
++			out_encoded = SWB_ENCODED_SIZE;
++		} else {
++			processed = sbc_encode(&this->msbc, port->write_buffer, port->write_buffer_size,
++					this->buffer_next + 2, min_in_size - 3, &out_encoded);
++			this->buffer_next[59] = 0x00;
++			if (out_encoded != WBS_PAYLOAD_SIZE) {
++				spa_log_warn(this->log, "sbc_encode return unexpected value: %zd", out_encoded);
++				return -EINVAL;
++			}
++			out_encoded = WBS_ENCODED_SIZE;
++		}
++
+ 		if (processed < 0) {
+-			spa_log_warn(this->log, "sbc_encode failed: %d", processed);
++			spa_log_warn(this->log, "%s_encode failed: %d", is_swb ? "lc3" : "sbc", processed);
+ 			return -EINVAL;
+ 		}
+-		this->buffer_next += out_encoded + 3;
++		this->buffer_next += out_encoded;
+ 		port->write_buffer_size = 0;
+ 
+ 		/* Write */
+@@ -468,9 +502,9 @@ static int flush_data(struct impl *this)
+ 
+ 		if (this->buffer_head == this->buffer_next)
+ 			this->buffer_head = this->buffer_next = this->buffer;
+-		else if (this->buffer_next + MSBC_ENCODED_SIZE > this->buffer + this->buffer_size) {
++		else if (this->buffer_next + min_in_size > this->buffer + this->buffer_size) {
+ 			/* Written bytes is not necessarily commensurate
+-			 * with MSBC_ENCODED_SIZE. If this occurs, copy data.
++			 * with |min_in_size|. If this occurs, copy data.
+ 			 */
+ 			int size = this->buffer_next - this->buffer_head;
+ 			spa_memmove(this->buffer, this->buffer_head, size);
+@@ -660,19 +694,34 @@ static int transport_start(struct impl *this)
+ 
+ 	spa_log_debug(this->log, "%p: start transport", this);
+ 
++
+ 	/* Init mSBC if needed */
+ 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+ 		sbc_init_msbc(&this->msbc, 0);
+ 		/* Libsbc expects audio samples by default in host endianness, mSBC requires little endian */
+ 		this->msbc.endian = SBC_LE;
++	}
++
++	/* Init LC3 if needed */
++	if (this->transport->codec == HFP_AUDIO_CODEC_LC3) {
++		const int frame_duration = 7500; // this is fixed for SWB
++		void *lc3_internal_mem = calloc(1, lc3_encoder_size(frame_duration, this->port.current_format.info.raw.rate));
++		this->lc3 = lc3_setup_encoder(frame_duration, this->port.current_format.info.raw.rate, 0, lc3_internal_mem);
++	}
+ 
++	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC ||
++		  this->transport->codec == HFP_AUDIO_CODEC_LC3) {
+ 		/* write_mtu might not be correct at this point, so we'll throw
+ 		 * in some common ones, at the cost of a potentially larger
+ 		 * allocation (size <= 120 * write_mtu). If it still fails to be
+ 		 * commensurate, we may end up doing memmoves, but nothing worse
+ 		 * is going to happen.
+ 		 */
+-		this->buffer_size = lcm(24, lcm(60, lcm(this->transport->write_mtu, 2 * MSBC_ENCODED_SIZE)));
++
++		const unsigned int pkt_size =
++		  this->transport->codec == HFP_AUDIO_CODEC_LC3 ? SWB_ENCODED_SIZE : WBS_ENCODED_SIZE;
++
++		this->buffer_size = lcm(24, lcm(60, lcm(this->transport->write_mtu, 2 * pkt_size)));
+ 		this->buffer = calloc(this->buffer_size, sizeof(uint8_t));
+ 		this->buffer_head = this->buffer_next = this->buffer;
+ 		if (this->buffer == NULL) {
+@@ -705,6 +754,8 @@ static int transport_start(struct impl *this)
+ fail:
+ 	free(this->buffer);
+ 	this->buffer = NULL;
++	free(this->lc3);
++	this->lc3 = NULL;
+ 	return res;
+ }
+ 
+@@ -819,6 +870,9 @@ static void transport_stop(struct impl *this)
+ 		this->buffer = NULL;
+ 		this->buffer_head = this->buffer_next = this->buffer;
+ 	}
++
++	free(this->lc3);
++	this->lc3 = NULL;
+ }
+ 
+ static int do_stop(struct impl *this)
+@@ -1018,11 +1072,18 @@ impl_node_port_enum_params(void *object, int seq,
+ 		info.position[0] = SPA_AUDIO_CHANNEL_MONO;
+ 
+ 		/* CVSD format has a rate of 8kHz
+-		 * MSBC format has a rate of 16kHz */
+-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC)
+-			info.rate = 16000;
+-		else
+-			info.rate = 8000;
++		 * MSBC format has a rate of 16kHz
++		 * LC3 format has a rate of 32kHz */
++		switch (this->transport->codec) {
++			case HFP_AUDIO_CODEC_LC3:
++				info.rate = 32000;
++				break;
++			case HFP_AUDIO_CODEC_MSBC:
++				info.rate = 16000;
++				break;
++			default:
++				info.rate = 8000;
++		}
+ 
+ 		/* build the param */
+ 		param = spa_format_audio_raw_build(&b, id, &info);
+@@ -1536,6 +1597,8 @@ impl_init(const struct spa_handle_factory *factory,
+ 	this->flush_timerfd = spa_system_timerfd_create(this->data_system,
+ 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+ 
++	this->lc3 = NULL;
++
+ 	return 0;
+ }
+ 
+diff --git a/spa/plugins/bluez5/sco-source.c b/spa/plugins/bluez5/sco-source.c
+index 7ed406600..221d12ca4 100644
+--- a/spa/plugins/bluez5/sco-source.c
++++ b/spa/plugins/bluez5/sco-source.c
+@@ -8,6 +8,7 @@
+ #include <time.h>
+ #include <fcntl.h>
+ #include <sys/types.h>
++#include <sys/time.h>
+ #include <sys/socket.h>
+ 
+ #include <spa/support/plugin.h>
+@@ -31,6 +32,7 @@
+ #include <spa/param/audio/format-utils.h>
+ #include <spa/pod/filter.h>
+ 
++#include <lc3.h>
+ #include <sbc/sbc.h>
+ 
+ #include "defs.h"
+@@ -129,14 +131,17 @@ struct impl {
+ 	uint64_t current_time;
+ 	uint64_t next_time;
+ 
+-	/* mSBC */
++	/* WBS/SWB */
++	bool seq_initialized;
++	uint8_t seq_num;
++	uint8_t buffer[SWB_ENCODED_SIZE];
++	uint8_t buffer_pos;
++
++	/* WBS */
+ 	sbc_t msbc;
+-	bool msbc_seq_initialized;
+-	uint8_t msbc_seq;
+ 
+-	/* mSBC frame parsing */
+-	uint8_t msbc_buffer[MSBC_ENCODED_SIZE];
+-	uint8_t msbc_buffer_pos;
++	/* SWB */
++	lc3_decoder_t lc3;
+ 
+ 	struct timespec now;
+ };
+@@ -347,47 +352,74 @@ static void recycle_buffer(struct impl *this, struct port *port, uint32_t buffer
+ static void msbc_buffer_append_byte(struct impl *this, uint8_t byte)
+ {
+         /* Parse mSBC frame header */
+-        if (this->msbc_buffer_pos == 0) {
++        if (this->buffer_pos == 0) {
+                 if (byte != 0x01) {
+-                        this->msbc_buffer_pos = 0;
++                        this->buffer_pos = 0;
+                         return;
+                 }
+         }
+-        else if (this->msbc_buffer_pos == 1) {
++        else if (this->buffer_pos == 1) {
+                 if (!((byte & 0x0F) == 0x08 &&
+                       ((byte >> 4) & 1) == ((byte >> 5) & 1) &&
+                       ((byte >> 6) & 1) == ((byte >> 7) & 1))) {
+-                        this->msbc_buffer_pos = 0;
++                        this->buffer_pos = 0;
+                         return;
+                 }
+         }
+-        else if (this->msbc_buffer_pos == 2) {
++        else if (this->buffer_pos == 2) {
+                 /* .. and beginning of MSBC frame: SYNCWORD + 2 nul bytes */
+                 if (byte != 0xAD) {
+-                        this->msbc_buffer_pos = 0;
++                        this->buffer_pos = 0;
+                         return;
+                 }
+         }
+-        else if (this->msbc_buffer_pos == 3) {
++        else if (this->buffer_pos == 3) {
+                 if (byte != 0x00) {
+-                        this->msbc_buffer_pos = 0;
++                        this->buffer_pos = 0;
+                         return;
+                 }
+         }
+-        else if (this->msbc_buffer_pos == 4) {
++        else if (this->buffer_pos == 4) {
+                 if (byte != 0x00) {
+-                        this->msbc_buffer_pos = 0;
++                        this->buffer_pos = 0;
+                         return;
+                 }
+         }
+-        else if (this->msbc_buffer_pos >= MSBC_ENCODED_SIZE) {
++        else if (this->buffer_pos >= WBS_ENCODED_SIZE) {
+                 /* Packet completed. Reset. */
+-                this->msbc_buffer_pos = 0;
++                this->buffer_pos = 0;
+                 msbc_buffer_append_byte(this, byte);
+                 return;
+         }
+-        this->msbc_buffer[this->msbc_buffer_pos] = byte;
+-        ++this->msbc_buffer_pos;
++        this->buffer[this->buffer_pos] = byte;
++        ++this->buffer_pos;
++}
++
++static void lc3_buffer_append_byte(struct impl *this, uint8_t byte)
++{
++        /* Parse LC3 frame header */
++        if (this->buffer_pos == 0) {
++                if (byte != 0x01) {
++                        this->buffer_pos = 0;
++                        return;
++                }
++        }
++        else if (this->buffer_pos == 1) {
++                if (!((byte & 0x0F) == 0x08 &&
++                      ((byte >> 4) & 1) == ((byte >> 5) & 1) &&
++                      ((byte >> 6) & 1) == ((byte >> 7) & 1))) {
++                        this->buffer_pos = 0;
++                        return;
++                }
++        }
++        else if (this->buffer_pos >= SWB_ENCODED_SIZE) {
++                /* Packet completed. Reset. */
++                this->buffer_pos = 0;
++                lc3_buffer_append_byte(this, byte);
++                return;
++        }
++        this->buffer[this->buffer_pos] = byte;
++        ++this->buffer_pos;
+ }
+ 
+ /* Helper function for debugging */
+@@ -445,7 +477,7 @@ static uint32_t preprocess_and_decode_msbc_data(void *userdata, uint8_t *read_da
+ 
+ 		msbc_buffer_append_byte(this, read_data[i]);
+ 
+-		if (this->msbc_buffer_pos != MSBC_ENCODED_SIZE)
++		if (this->buffer_pos != WBS_ENCODED_SIZE)
+ 			continue;
+ 
+ 		/*
+@@ -455,28 +487,28 @@ static uint32_t preprocess_and_decode_msbc_data(void *userdata, uint8_t *read_da
+ 		buf = spa_bt_decode_buffer_get_write(&port->buffer, &avail);
+ 
+ 		/* Check sequence number */
+-		seq = ((this->msbc_buffer[1] >> 4) & 1) |
+-			((this->msbc_buffer[1] >> 6) & 2);
++		seq = ((this->buffer[1] >> 4) & 1) |
++			((this->buffer[1] >> 6) & 2);
+ 
+ 		spa_log_trace(this->log, "mSBC packet seq=%u", seq);
+-		if (!this->msbc_seq_initialized) {
+-			this->msbc_seq_initialized = true;
+-			this->msbc_seq = seq;
+-		} else if (seq != this->msbc_seq) {
++		if (!this->seq_initialized) {
++			this->seq_initialized = true;
++			this->seq_num = seq;
++		} else if (seq != this->seq_num) {
+ 			/* TODO: PLC (too late to insert data now) */
+ 			spa_log_info(this->log,
+-					"missing mSBC packet: %u != %u", seq, this->msbc_seq);
+-			this->msbc_seq = seq;
++					"missing mSBC packet: %u != %u", seq, this->seq_num);
++			this->seq_num = seq;
+ 		}
+ 
+-		this->msbc_seq = (this->msbc_seq + 1) % 4;
++		this->seq_num = (this->seq_num + 1) % 4;
+ 
+-		if (avail < MSBC_DECODED_SIZE)
++		if (avail < WBS_DECODED_SIZE)
+ 			spa_log_warn(this->log, "Output buffer full, dropping msbc data");
+ 
+ 		/* decode frame */
+ 		processed = sbc_decode(
+-			&this->msbc, this->msbc_buffer + 2, MSBC_ENCODED_SIZE - 3,
++			&this->msbc, this->buffer + 2, WBS_ENCODED_SIZE - 3,
+ 					buf, avail, &written);
+ 
+ 		if (processed < 0) {
+@@ -492,6 +524,84 @@ static uint32_t preprocess_and_decode_msbc_data(void *userdata, uint8_t *read_da
+ 	return decoded;
+ }
+ 
++static uint32_t preprocess_and_decode_lc3_data(void *userdata, uint8_t *read_data, int size_read)
++{
++	struct impl *this = userdata;
++	struct port *port = &this->port;
++	uint32_t decoded = 0;
++	int i;
++
++	spa_log_trace(this->log, "handling LC3 data");
++
++	/*
++	 * Check if the packet contains only zeros - if so ignore the packet.
++	 * This is necessary, because some kernels insert bogus "all-zero" packets
++	 * into the datastream.
++	 * See https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/549
++	 */
++	if (is_zero_packet(read_data, size_read))
++		return 0;
++
++	for (i = 0; i < size_read; ++i) {
++		void *buf;
++		uint32_t avail;
++		int seq, rc;
++
++		lc3_buffer_append_byte(this, read_data[i]);
++
++		if (this->buffer_pos != SWB_ENCODED_SIZE)
++			continue;
++
++		/*
++		 * Handle found LC3 packet
++		 */
++
++		buf = spa_bt_decode_buffer_get_write(&port->buffer, &avail);
++
++		/* Check sequence number */
++		seq = ((this->buffer[1] >> 4) & 1) |
++			((this->buffer[1] >> 6) & 2);
++
++    bool force_plc = false;
++		spa_log_trace(this->log, "LC3 packet seq=%u", seq);
++		if (!this->seq_initialized) {
++			this->seq_initialized = true;
++			this->seq_num = seq;
++		} else if (seq != this->seq_num) {
++      force_plc = true;
++			spa_log_info(this->log,
++					"missing LC3 packet: %u != %u", seq, this->seq_num);
++			this->seq_num = seq;
++		}
++
++		this->seq_num = (this->seq_num + 1) % 4;
++
++		if (avail < SWB_DECODED_SIZE)
++			spa_log_warn(this->log, "Output buffer full, dropping lc3 data");
++
++		if (force_plc) {
++			rc = lc3_decode(this->lc3, NULL, 0, LC3_PCM_FORMAT_S16, buf, 1);
++		} else {
++			/* decode frame */
++			rc = lc3_decode(this->lc3, this->buffer + 2, SWB_ENCODED_SIZE - 2,
++					LC3_PCM_FORMAT_S16, buf, 1);
++		}
++
++		if (rc == 1) {
++			spa_log_debug(this->log, "lc3_decode conducted a PLC");
++		}
++
++		if (rc < 0) {
++			spa_log_warn(this->log, "lc3_decode failed: %d", rc);
++			continue;
++		}
++
++		spa_bt_decode_buffer_write_packet(&port->buffer, SWB_DECODED_SIZE);
++		decoded += SWB_DECODED_SIZE;
++	}
++
++	return decoded;
++}
+ static int sco_source_cb(void *userdata, uint8_t *read_data, int size_read)
+ {
+ 	struct impl *this = userdata;
+@@ -518,7 +628,9 @@ static int sco_source_cb(void *userdata, uint8_t *read_data, int size_read)
+ 	hexdump_to_log(this, read_data, size_read);
+ #endif
+ 
+-	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
++	if (this->transport->codec == HFP_AUDIO_CODEC_LC3) {
++		decoded = preprocess_and_decode_lc3_data(userdata, read_data, size_read);
++	} else if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+ 		decoded = preprocess_and_decode_msbc_data(userdata, read_data, size_read);
+ 	} else {
+ 		uint32_t avail;
+@@ -690,9 +802,19 @@ static int transport_start(struct impl *this)
+ 		sbc_init_msbc(&this->msbc, 0);
+ 		/* Libsbc expects audio samples by default in host endianness, mSBC requires little endian */
+ 		this->msbc.endian = SBC_LE;
+-		this->msbc_seq_initialized = false;
++	}
++
++	/* Init LC3 if needed */
++	if (this->transport->codec == HFP_AUDIO_CODEC_LC3) {
++		const int frame_duration = 7500; // this is fixed for SWB
++		void *lc3_internal_mem = calloc(1, lc3_decoder_size(frame_duration, port->current_format.info.raw.rate));
++		this->lc3 = lc3_setup_decoder(frame_duration, port->current_format.info.raw.rate, 0, lc3_internal_mem);
++	}
+ 
+-		this->msbc_buffer_pos = 0;
++	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC ||
++		  this->transport->codec == HFP_AUDIO_CODEC_LC3) {
++		this->seq_initialized = false;
++		this->buffer_pos = 0;
+ 	}
+ 
+ 	this->io_error = false;
+@@ -708,6 +830,8 @@ static int transport_start(struct impl *this)
+ 	return 0;
+ 
+ fail:
++	free(this->lc3);
++	this->lc3 = NULL;
+ 	return res;
+ }
+ 
+@@ -798,6 +922,9 @@ static void transport_stop(struct impl *this)
+ 	spa_loop_invoke(this->data_loop, do_remove_transport_source, 0, NULL, 0, true, this);
+ 
+ 	spa_bt_decode_buffer_clear(&port->buffer);
++
++	free(this->lc3);
++	this->lc3 = NULL;
+ }
+ 
+ static int do_stop(struct impl *this)
+@@ -995,12 +1122,19 @@ impl_node_port_enum_params(void *object, int seq,
+ 		info.channels = 1;
+ 		info.position[0] = SPA_AUDIO_CHANNEL_MONO;
+ 
+-		 /* CVSD format has a rate of 8kHz
+-		  * MSBC format has a rate of 16kHz */
+-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC)
+-			info.rate = 16000;
+-		else
+-			info.rate = 8000;
++		/* CVSD format has a rate of 8kHz
++		 * MSBC format has a rate of 16kHz
++		 * LC3 format has a rate of 32kHz */
++		switch (this->transport->codec) {
++			case HFP_AUDIO_CODEC_LC3:
++				info.rate = 32000;
++				break;
++			case HFP_AUDIO_CODEC_MSBC:
++				info.rate = 16000;
++				break;
++			default:
++				info.rate = 8000;
++		}
+ 
+ 		/* build the param */
+ 		param = spa_format_audio_raw_build(&b, id, &info);
+@@ -1636,6 +1770,8 @@ impl_init(const struct spa_handle_factory *factory,
+ 	this->timerfd = spa_system_timerfd_create(this->data_system,
+ 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+ 
++	free(this->lc3);
++	this->lc3 = NULL;
++
+ 	return 0;
+ }
+ 

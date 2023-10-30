@@ -50,7 +50,6 @@ tags_sorted_by_file
 
 # Patch files.
 *.diff
-*.patch
 *.orig
 *.rej
 
