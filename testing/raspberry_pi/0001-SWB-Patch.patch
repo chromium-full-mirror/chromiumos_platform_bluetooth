@@ -1,3 +1,28 @@
+From d62c5ba64e9f00f77393b10821d77f49f5517224 Mon Sep 17 00:00:00 2001
+From: Jeremy Wu <jrwu@chromium.org>
+Date: Tue, 7 Nov 2023 15:09:58 +0800
+Subject: [PATCH] SWB Patch
+
+---
+ master.patch                                |   0
+ spa/include/spa/param/bluetooth/audio.h     |   1 +
+ spa/include/spa/param/bluetooth/type-info.h |   1 +
+ spa/plugins/bluez5/backend-native.c         | 128 ++++++++----
+ spa/plugins/bluez5/backend-ofono.c          |  20 +-
+ spa/plugins/bluez5/bluez-hardware.conf      |   1 +
+ spa/plugins/bluez5/bluez5-device.c          |  17 +-
+ spa/plugins/bluez5/defs.h                   |  26 ++-
+ spa/plugins/bluez5/hci.c                    |  21 +-
+ spa/plugins/bluez5/meson.build              |   5 +
+ spa/plugins/bluez5/quirks.c                 |   8 +
+ spa/plugins/bluez5/sco-sink.c               | 113 +++++++---
+ spa/plugins/bluez5/sco-source.c             | 218 ++++++++++++++++----
+ 13 files changed, 437 insertions(+), 122 deletions(-)
+ create mode 100644 master.patch
+
+diff --git a/master.patch b/master.patch
+new file mode 100644
+index 000000000..e69de29bb
 diff --git a/spa/include/spa/param/bluetooth/audio.h b/spa/include/spa/param/bluetooth/audio.h
 index 68c6b9f22..39c79c484 100644
 --- a/spa/include/spa/param/bluetooth/audio.h
@@ -401,7 +426,7 @@ index 3dcd5f962..4e819358d 100644
  # Features are disabled with the key "no-features" whose value is an
  # array of strings in the match rule.
 diff --git a/spa/plugins/bluez5/bluez5-device.c b/spa/plugins/bluez5/bluez5-device.c
-index bb7db13a5..c9c3bc604 100644
+index 02a3226b5..68f0a823c 100644
 --- a/spa/plugins/bluez5/bluez5-device.c
 +++ b/spa/plugins/bluez5/bluez5-device.c
 @@ -9,6 +9,8 @@
@@ -449,7 +474,7 @@ index bb7db13a5..c9c3bc604 100644
  	case HFP_AUDIO_CODEC_MSBC:
  		return "msbc";
  	case HFP_AUDIO_CODEC_CVSD:
-@@ -1735,7 +1745,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
+@@ -1768,7 +1778,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
  			desc_and_codec = spa_aprintf(_("Headset Head Unit (HSP/HFP, codec %s)"),
  						get_hfp_codec_description(hfp_codec));
  			desc = desc_and_codec;
@@ -458,7 +483,7 @@ index bb7db13a5..c9c3bc604 100644
  		} else {
  			desc = _("Headset Head Unit (HSP/HFP)");
  			priority = 1;
-@@ -2093,7 +2103,7 @@ static struct spa_pod *build_prop_info_codec(struct impl *this, struct spa_pod_b
+@@ -2126,7 +2136,7 @@ static struct spa_pod *build_prop_info_codec(struct impl *this, struct spa_pod_b
  #define FOR_EACH_MEDIA_CODEC(j, codec) \
  		for (j = -1; iterate_supported_media_codecs(this, &j, &codec);)
  #define FOR_EACH_HFP_CODEC(j) \
@@ -467,7 +492,7 @@ index bb7db13a5..c9c3bc604 100644
  			if (spa_bt_device_supports_hfp_codec(this->bt_dev, j) == 1)
  
  	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_PropInfo, id);
-@@ -2576,6 +2586,9 @@ static int impl_set_param(void *object,
+@@ -2609,6 +2619,9 @@ static int impl_set_param(void *object,
  			} else if (codec_id == SPA_BLUETOOTH_AUDIO_CODEC_MSBC &&
  					spa_bt_device_supports_hfp_codec(this->bt_dev, HFP_AUDIO_CODEC_MSBC) == 1) {
  				return set_profile(this, this->profile, codec_id, true);
@@ -478,10 +503,10 @@ index bb7db13a5..c9c3bc604 100644
  		}
  		return -EINVAL;
 diff --git a/spa/plugins/bluez5/defs.h b/spa/plugins/bluez5/defs.h
-index 0f7ac95cb..e2808add0 100644
+index 0651ee1cb..aac583703 100644
 --- a/spa/plugins/bluez5/defs.h
 +++ b/spa/plugins/bluez5/defs.h
-@@ -141,6 +141,7 @@ extern "C" {
+@@ -143,6 +143,7 @@ extern "C" {
  
  #define HFP_AUDIO_CODEC_CVSD    0x01
  #define HFP_AUDIO_CODEC_MSBC    0x02
@@ -489,7 +514,7 @@ index 0f7ac95cb..e2808add0 100644
  
  #define A2DP_OBJECT_MANAGER_PATH "/MediaEndpoint"
  #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
-@@ -154,11 +155,15 @@ extern "C" {
+@@ -158,11 +159,15 @@ extern "C" {
  
  #define SPA_BT_NO_BATTERY			((uint8_t)255)
  
@@ -509,7 +534,7 @@ index 0f7ac95cb..e2808add0 100644
  
  enum spa_bt_media_direction {
  	SPA_BT_MEDIA_SOURCE,
-@@ -239,6 +244,9 @@ enum spa_bt_hfp_sdp_ag_features {
+@@ -253,6 +258,9 @@ enum spa_bt_hfp_sdp_ag_features {
  	SPA_BT_HFP_SDP_AG_FEATURE_IN_BAND_RING_TONE =	(1 << 3),
  	SPA_BT_HFP_SDP_AG_FEATURE_ATTACH_VOICE_TAG =	(1 << 4),
  	SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
@@ -519,7 +544,7 @@ index 0f7ac95cb..e2808add0 100644
  };
  
  enum spa_bt_hfp_hf_feature {
-@@ -286,6 +294,9 @@ enum spa_bt_hfp_sdp_hf_features {
+@@ -300,6 +308,9 @@ enum spa_bt_hfp_sdp_hf_features {
  	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION =	(1 << 3),
  	SPA_BT_HFP_SDP_HF_FEATURE_REMOTE_VOLUME_CONTROL =	(1 << 4),
  	SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
@@ -529,7 +554,7 @@ index 0f7ac95cb..e2808add0 100644
  };
  
  static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
-@@ -338,8 +349,8 @@ struct spa_bt_adapter {
+@@ -354,8 +365,8 @@ struct spa_bt_adapter {
  	uint32_t bluetooth_class;
  	uint32_t profiles;
  	int powered;
@@ -540,7 +565,7 @@ index 0f7ac95cb..e2808add0 100644
  	unsigned int legacy_endpoints_registered:1;
  	unsigned int a2dp_application_registered:1;
  	unsigned int bap_application_registered:1;
-@@ -735,6 +746,7 @@ enum spa_bt_feature {
+@@ -754,6 +765,7 @@ enum spa_bt_feature {
  	SPA_BT_FEATURE_SBC_XQ		= (1 << 5),
  	SPA_BT_FEATURE_FASTSTREAM	= (1 << 6),
  	SPA_BT_FEATURE_A2DP_DUPLEX	= (1 << 7),
@@ -548,7 +573,7 @@ index 0f7ac95cb..e2808add0 100644
  };
  
  struct spa_bt_quirks;
-@@ -746,7 +758,7 @@ int spa_bt_quirks_get_features(const struct spa_bt_quirks *quirks,
+@@ -765,7 +777,7 @@ int spa_bt_quirks_get_features(const struct spa_bt_quirks *quirks,
  		uint32_t *features);
  void spa_bt_quirks_destroy(struct spa_bt_quirks *quirks);
  
@@ -688,7 +713,7 @@ index a5538d640..c239da736 100644
  	return 0;
  }
 diff --git a/spa/plugins/bluez5/sco-sink.c b/spa/plugins/bluez5/sco-sink.c
-index 133b81821..b0e3f5d22 100644
+index 0338373e3..3418e8ea2 100644
 --- a/spa/plugins/bluez5/sco-sink.c
 +++ b/spa/plugins/bluez5/sco-sink.c
 @@ -6,7 +6,9 @@
@@ -911,7 +936,7 @@ index 133b81821..b0e3f5d22 100644
  }
  
 diff --git a/spa/plugins/bluez5/sco-source.c b/spa/plugins/bluez5/sco-source.c
-index 7ed406600..221d12ca4 100644
+index aa8b34482..eef531d1c 100644
 --- a/spa/plugins/bluez5/sco-source.c
 +++ b/spa/plugins/bluez5/sco-source.c
 @@ -8,6 +8,7 @@
@@ -1255,13 +1280,15 @@ index 7ed406600..221d12ca4 100644
  
  		/* build the param */
  		param = spa_format_audio_raw_build(&b, id, &info);
-@@ -1636,6 +1770,8 @@ impl_init(const struct spa_handle_factory *factory,
+@@ -1635,6 +1769,8 @@ impl_init(const struct spa_handle_factory *factory,
  	this->timerfd = spa_system_timerfd_create(this->data_system,
  			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
  
-+	free(this->lc3);
 +	this->lc3 = NULL;
 +
  	return 0;
  }
  
+-- 
+2.30.2
+
