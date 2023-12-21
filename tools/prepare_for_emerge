@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# Copyright 2023 The ChromiumOS Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# A script to help developers checkout overlays and build packages so that they
+# can emerge and deploy packages to the DUT.
+# 1. (optional) Flash the DUT to the latest build
+# 2. (optional) repo sync the whole CrOS source tree
+# 3. Checkout to the correct overlay according to the DUT
+# 4. Build all dependencies for the specific packages
+#
+# After these, emerge and deploy shall work smoothly.
+
+DUT=
+BOARD=
+CROS_ROOT=`dirname "$0"`/../../../.. || return
+PACKAGES=()
+USE="floss_upstream -cros-debug"
+CLEAN=1
+FLASH=1
+SYNC=1
+
+function usage {
+  cat <<EOF
+
+Usage: prepare_for_emerge --dut <DUT>
+           [--board <BOARD>] [--packages <PACKAGES>] [--use <USE>]
+           [--cros-root <CROS_ROOT>] [--no-clean] [--no-flash] [--no-sync]
+Usage: prepare_for_emerge --help
+
+Flash the latest canary test image onto the DUT, repo sync, and build all
+dependencies for PACKAGES based on the DUT CrOS version.
+
+Required flags:
+  --dut         A ssh-able target for the DUT. E.g.: 192.168.0.35,
+                ssh://localhost:3535, chromeos35-row35-rack3-host5.cros
+
+Optional flags:
+  --board       The board name such as brask, brya-arc-t, strongbad-kernelnext
+                (Default: Query from the DUT)
+  --packages    Comma-separated packages list to build. Basically you should
+                list all workon-ed packages here. Build all packges if an empty
+                list is passed. (Default: Query from the workon list)
+  --use         The USE flags for \`cros build-packages\`.
+                (Default: "floss_upstream -cros-debug")
+  --cros-root   The CrOS root path. (Default: Auto-detected from script path)
+  --no-clean    Do not \`cros clean\` the SDK. (Default: Clean)
+  --no-flash    Do not \`cros flash\` the DUT. (Default: Flash)
+  --no-sync     Do not \`repo sync\` the tree. (Default: Sync)
+  --help        Print this.
+EOF
+}
+
+function err {
+  echo "$(date +'%Y-%m-%dT%H:%M:%S%z') ERROR prepare_for_emerge: $*" >&2
+}
+
+function log {
+  echo "$(date +'%Y-%m-%dT%H:%M:%S%z') prepare_for_emerge: $*"
+}
+
+#######################################
+# Get the lsb info from the DUT.
+# Globals (read-only):
+#   DUT
+# Arguments:
+#   The key to query, e.g. CHROMEOS_RELEASE_VERSION
+# Outputs:
+#   STDOUT: The value of the lsb field.
+#######################################
+function get_dut_lsb {
+  local ret
+  ret=`ssh ${DUT} -- "grep -m 1 '^${1}=' /etc/lsb-release"`
+  printf %s "${ret#${1}=}"
+}
+
+#######################################
+# Checkout chromiumos-overlay to the same point as the DUT's image.
+# Globals (read-only):
+#   DUT
+#   CROS_ROOT
+# Arguments:
+#   None
+# Returns:
+#   0 on succeeded, 1 on any error
+#######################################
+function checkout_overlay {
+  local dut_ver
+  dut_ver=`get_dut_lsb "CHROMEOS_RELEASE_VERSION"`
+  if ! [[ "${dut_ver}" =~ ^[0-9]+\.0\.0$ ]]; then
+    # TODO(chharry): Add support of branched milestones. The branches like
+    # cros/release-R121-15699.B shall be helpful but need to fetch first.
+    err "Invalid CHROMEOS_RELEASE_VERSION: ${dut_ver}"
+    return 1
+  fi
+  log "Got DUT version=${dut_ver}, checking out overlay"
+  dut_ver="${dut_ver%.0.0}"
+
+  local sdk_ver git_path="${CROS_ROOT}"/src/third_party/chromiumos-overlay
+  git -C "${git_path}" checkout m/main
+  sdk_ver=`grep -m 1 '^CHROMEOS_BUILD=' \
+    "${git_path}"/chromeos/config/chromeos_version.sh`
+  sdk_ver="${sdk_ver#CHROMEOS_BUILD=}"
+  if ! [[ "${sdk_ver}" =~ ^[0-9]+$ ]]; then
+    err "Invalid version in overlay: ${sdk_ver}"
+    return 1
+  fi
+
+  if (( sdk_ver < dut_ver )); then
+    err "SDK out of sync"
+    return 1
+  fi
+
+  local commit_hash
+  commit_hash=`git -C "${git_path}" log -1 --format=format:%H \
+    --grep='^Increment to version R[0-9]\+-'"${dut_ver}"'\.0\.0$' \
+    "${git_path}"/chromeos/config/chromeos_version.sh`
+  git -C "${git_path}" checkout "${commit_hash}"
+}
+
+#######################################
+# Process arguments and update globals.
+# Globals:
+#   DUT
+#   BOARD
+#   CROS_ROOT
+#   PACKAGES
+#   USE
+#   CLEAN
+#   FLASH
+#   SYNC
+# Arguments:
+#   See usage
+# Returns:
+#   0 on succeeded, 1 on any error
+#######################################
+function process_args {
+  local IFS
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --dut)
+      DUT="$2"
+      shift
+      ;;
+    --board)
+      BOARD="$2"
+      shift
+      ;;
+    --help)
+      usage
+      exit
+      ;;
+    --packages)
+      IFS=, PACKAGES=($2)
+      shift
+      ;;
+    --cros-root)
+      CROS_ROOT="$2"
+      shift
+      ;;
+    --no-clean)
+      CLEAN=0
+      ;;
+    --no-flash)
+      FLASH=0
+      ;;
+    --no-sync)
+      SYNC=0
+      ;;
+    *)
+      err "Unknow argument: $1"
+      usage
+      return 1
+      ;;
+    esac
+    shift
+  done
+
+  if [[ -z "${DUT}" ]]; then
+    err "Unspecified DUT"
+    usage
+    return 1
+  fi
+
+  CROS_ROOT=`realpath "${CROS_ROOT}"`
+  cd "${CROS_ROOT}"
+
+  if [[ -z "${BOARD}" ]]; then
+    BOARD=`get_dut_lsb "CHROMEOS_RELEASE_BOARD"`
+  fi
+
+  if [[ "${#PACKAGES[@]}" == 0 ]]; then
+    IFS=$' \t\n' PACKAGES=(
+      `"${CROS_ROOT}"/chromite/bin/cros workon --board "${BOARD}" list`
+    )
+    if [[ "${#PACKAGES[@]}" == 0 ]]; then
+      read -p "No workon-ed packages! Build all packages? [N/y] "
+      case "${REPLY}" in
+        y*|Y*)
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    fi
+  fi
+
+  IFS=' '
+  log "Running with flags:
+    DUT=${DUT}
+    BOARD=${BOARD}
+    CROS_ROOT=${CROS_ROOT}
+    PACKAGES=${PACKAGES[@]}
+    USE=${USE}
+    CLEAN=${CLEAN}
+    FLASH=${FLASH}
+    SYNC=${SYNC}"
+}
+
+function main {
+  set -e
+
+  process_args "$@"
+
+  if [[ ${CLEAN} == 1 ]]; then
+    log "Running cros clean..."
+    "${CROS_ROOT}"/chromite/bin/cros clean --safe
+  fi
+  if [[ ${FLASH} == 1 ]]; then
+    log "Flashing..."
+    "${CROS_ROOT}"/chromite/bin/cros flash --no-ping \
+      --disable-rootfs-verification \
+      "${DUT}" "xbuddy://remote/${BOARD}/latest-canary/test"
+  fi
+  if [[ ${SYNC} == 1 ]]; then
+    log "Running repo sync..."
+    repo sync -j40
+  fi
+  checkout_overlay
+  log "Running update_chroot..."
+  USE="${USE}" "${CROS_ROOT}"/chromite/bin/update_chroot
+  log "Building dependencies..."
+  USE="${USE}" "${CROS_ROOT}"/chromite/bin/cros build-packages \
+    --skip-setup-board --board="${BOARD}" --jobs=40 "${PACKAGES[@]}"
+}
+
+main "$@"
