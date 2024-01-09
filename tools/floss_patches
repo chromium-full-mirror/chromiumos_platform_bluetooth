@@ -49,6 +49,15 @@ class GitHelper(object):
         """Adds all changes into index."""
         subprocess.check_call(self.git_command + ["add", "."])
 
+    def checkout(self, hash):
+        subprocess.check_call(self.git_command + ["checkout", "--quiet", hash])
+
+    def am(self, patches):
+        subprocess.check_call(self.git_command + ["am"] + patches)
+
+    def rebase(self, hash):
+        subprocess.check_call(self.git_command + ["rebase", hash])
+
     def diff(self, stat=None):
         """Returns the diff of the cached (staged) changes.
 
@@ -59,6 +68,54 @@ class GitHelper(object):
         if stat is not None:
             cmd.append(f"--stat={stat}")
         return subprocess.check_output(self.git_command + cmd)
+
+    def format_patch(self, range, out_dir=None, unified=None, signature=None):
+        """Generates patches.
+
+        Args:
+            range: The git revision range str. For example HASH1..HASH2
+                   generates patches for each commit between HASH1 and HASH2,
+                   while HASH1 is not included but HASH2 is.
+                   Alternatively, use -<n> to generate patches from the topmost
+                   <n> commits.
+            out_dir: The output directory path str.
+            unified: An int indicating the lines before and after the changed
+                     lines.
+            signature: The signature str at the end of the patch file.
+        """
+        cmd = ["format-patch", range]
+        if out_dir is not None:
+            cmd.append("--output-directory")
+            cmd.append(out_dir)
+        if unified is not None:
+            cmd.append(f"--unified={unified}")
+        if signature is None:
+            cmd.append("--no-signature")
+        else:
+            cmd.append(f"--signature={signature}")
+        subprocess.check_call(self.git_command + cmd)
+
+    def get_head_commit(self):
+        return (
+            subprocess.check_output(
+                self.git_command + ["log", "-1", "--format=format:%H"]
+            )
+            .decode("utf-8")
+            .strip()
+        )
+
+    def is_clean(self):
+        return (
+            subprocess.check_output(
+                self.git_command + ["status", "--porcelain"]
+            )
+            == b""
+        )
+
+    def check_is_ancestor(self, lhs, rhs):
+        subprocess.check_call(
+            self.git_command + ["merge-base", lhs, "--is-ancestor", rhs]
+        )
 
 
 class OverlayHelper(object):
@@ -174,6 +231,13 @@ class OverlayHelper(object):
         )
         with open(str(self.ebuild_path), "w") as filehandle:
             filehandle.writelines(floss_build_lines)
+
+    def floss_get_git_am_hint(self):
+        with open(str(self.ebuild_path), "r") as filehandle:
+            for line in filehandle:
+                if line.startswith(self.GIT_AM_HINT_PREFIX):
+                    return line[len(self.GIT_AM_HINT_PREFIX) : -1]
+        raise RuntimeError("Git am hint not found in ebuild")
 
 
 def gerrit(api_name, method=None, data=None):
@@ -363,6 +427,124 @@ def create_merge():
     create_overlay_cl_from_merge(cl_number)
 
 
+def get_local_floss_and_overlay_path():
+    cros_root = Path(__file__).resolve().parent
+    for _ in range(4):
+        cros_root = cros_root.parent
+    floss_path = (
+        cros_root
+        / "src"
+        / "aosp"
+        / "packages"
+        / "modules"
+        / "Bluetooth"
+        / "upstream"
+    )
+    overlay_path = cros_root / "src" / "third_party" / "chromiumos-overlay"
+    if not floss_path.is_dir():
+        raise RuntimeError("Failed to anchor Floss upstream path in CrOS SDK")
+    if not overlay_path.is_dir():
+        raise RuntimeError("Failed to anchor chromiumos-overlay in CrOS SDK")
+    return floss_path, overlay_path
+
+
+def fix_upstream_patches():
+    """Fix the upstream patches.
+
+    Implementation of `floss_patches fix_upstream`.
+    """
+    floss_path, overlay_path = get_local_floss_and_overlay_path()
+    overlay_helper = OverlayHelper(overlay_path)
+    patches_path = (
+        overlay_helper.floss_overlay_path / "files" / "patches_upstream"
+    )
+
+    if not patches_path.exists():
+        logging.info("Patches directory doesn't exist; Nothing to be done")
+        return
+    if not patches_path.is_dir():
+        raise ValueError(str(patches_path) + " is not a dir")
+
+    logging.info("Fixing upstream patches, floss repo = %s", floss_path)
+
+    hint = overlay_helper.floss_get_git_am_hint()
+    logging.info("Current git am hint: %s", hint)
+
+    git_helper = GitHelper(floss_path)
+    if not git_helper.is_clean():
+        raise RuntimeError("Floss upstream repo is not clean")
+    git_helper.check_is_ancestor(hint, "m/main")
+
+    # Am and rebase
+    git_helper.checkout(hint)
+    git_helper.am([str(p) for p in sorted(patches_path.iterdir())])
+    try:
+        git_helper.rebase("m/main")
+    except subprocess.CalledProcessError:
+        logging.warning(
+            "!!! Please follow the instructions above to resolve the "
+            "conflicts, then re-run the script with `--continue` !!!"
+        )
+        return
+
+    logging.error(
+        "Rebased successfully, which means no conflicts! "
+        "Leaving the am-ed tree as is and exit."
+    )
+
+
+def fix_upstream_patches_continue():
+    """Fix the upstream patches.
+
+    Implementation of `floss_patches fix_upstream`.
+    """
+    floss_path, overlay_path = get_local_floss_and_overlay_path()
+    overlay_helper = OverlayHelper(overlay_path)
+    patches_path = (
+        overlay_helper.floss_overlay_path / "files" / "patches_upstream"
+    )
+
+    git_helper = GitHelper(floss_path)
+    if not git_helper.is_clean():
+        raise RuntimeError("Floss upstream repo is not clean")
+    if overlay_path.joinpath(".git", "rebase-merge").exists():
+        raise RuntimeError(
+            "Found .git/rebase-merge in overlay, rebase unfinished?"
+        )
+
+    logging.info(
+        "Fixing (--continue) upstream patches, floss repo = %s", floss_path
+    )
+
+    # Remove old patches first
+    if patches_path.exists():
+        if not patches_path.is_dir():
+            raise ValueError(str(patches_path) + "is not a dir")
+        shutil.rmtree(str(patches_path))
+
+    # Generate patches
+    logging.info("Generating patch files...")
+    rebased_head = git_helper.get_head_commit()
+    git_helper.format_patch(
+        f"m/main..{rebased_head}",
+        out_dir=str(patches_path),
+        unified=1,
+        signature=None,
+    )
+
+    # Update hint
+    git_helper.checkout("m/main")
+    new_hint = git_helper.get_head_commit()
+    overlay_helper.floss_update_git_am_hint(new_hint)
+
+    logging.info(
+        "Fix patches done. "
+        "Test it with `USE=floss_upstream emerge-${BOARD} floss`, "
+        "and upload the changes in %s for review.",
+        overlay_path,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Manipulate the Floss upstream/local patches"
@@ -375,13 +557,17 @@ def main():
     )
     parser.add_argument(
         "command",
-        choices=["pull"],
+        choices=["pull", "fix_upstream"],
         help=(
             "'pull' pulls the upstream patches to local, which should be done "
             "every time a merge is created. By default it works independently "
             "and doesn't rely on any local data. It creates a merge in the "
             ".../Bluetooth/local repo, pulls all upstream patches to local in "
             "chromiumos-overlay repo, set 2 CLs to Cq-Depend, and vote CQ+1. "
+            "'fix_upstream' helps rebase the upstream patches to ToT. The "
+            "developer should resolve the conflicts in the "
+            ".../Bluetooth/upstream repo on the local storage, and re-run "
+            "this script with the '--continue' flag."
         ),
     )
     parser.add_argument(
@@ -393,6 +579,16 @@ def main():
             "update patches based on the given merge CL and upload a overlay "
             "CL. It still sets both to the dependencies and vote CQ+1."
         ),
+    )
+    parser.add_argument(
+        "--continue",
+        action="store_true",
+        help=(
+            "The 'fix_upstream' command stops when there are any conflicts "
+            "that require deveplopers to resolve. Re-run the script with this "
+            "flag to continue the progress."
+        ),
+        dest="continue_fix",
     )
 
     args = parser.parse_args()
@@ -416,6 +612,11 @@ def main():
             create_overlay_cl_from_merge(args.from_merge)
         else:
             create_merge()
+    elif args.command == "fix_upstream":
+        if args.continue_fix:
+            fix_upstream_patches_continue()
+        else:
+            fix_upstream_patches()
     else:
         raise ValueError(f"Invalid command: {args.command}")
 
