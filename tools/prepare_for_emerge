@@ -147,6 +147,10 @@ function process_args {
       BOARD="$2"
       shift
       ;;
+    --use)
+      USE="$2"
+      shift
+      ;;
     --help)
       usage
       exit
