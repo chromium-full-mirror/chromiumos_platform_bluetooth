@@ -242,8 +242,6 @@ function main {
     repo sync -j40
   fi
   checkout_overlay
-  log "Running update_chroot..."
-  USE="${USE}" "${CROS_ROOT}"/chromite/bin/update_chroot
   log "Building dependencies..."
   USE="${USE}" "${CROS_ROOT}"/chromite/bin/cros build-packages \
     --skip-setup-board --board="${BOARD}" --jobs=40 "${PACKAGES[@]}"
