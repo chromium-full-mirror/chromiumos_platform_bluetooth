@@ -6,9 +6,11 @@
 # A script to help developers checkout overlays and build packages so that they
 # can emerge and deploy packages to the DUT.
 # 1. (optional) Flash the DUT to the latest build
-# 2. (optional) repo sync the whole CrOS source tree
-# 3. Checkout to the correct overlay according to the DUT
-# 4. Build all dependencies for the specific packages
+# 2a. (Googlers only) repo sync the whole CrOS source tree to the same manifest
+#     as the DUT
+# 2b. repo sync the whole CrOS source tree to ToT and then perform 2c
+# 2c. Checkout to the same chromiumos-overlay commit as the DUT
+# 3. Build all dependencies for the specific packages
 #
 # After these, emerge and deploy shall work smoothly.
 
@@ -18,7 +20,7 @@ CROS_ROOT=`dirname "$0"`/../../../.. || return
 PACKAGES=()
 USE="floss_upstream -cros-debug"
 FLASH=1
-SYNC=1
+SYNC="--sync-with-manifest"
 JOBS=$((`nproc`/2))
 
 function usage {
@@ -26,7 +28,8 @@ function usage {
 
 Usage: prepare_for_emerge --dut <DUT>
            [--board <BOARD>] [--packages <PACKAGES>] [--use <USE>]
-           [--cros-root <CROS_ROOT>] [--no-flash] [--no-sync]
+           [--cros-root <CROS_ROOT>] [--no-flash]
+           [--sync-with-manifest|--sync-and-checkout|--checkout-only]
 Usage: prepare_for_emerge --help
 
 Flash the latest canary test image onto the DUT, repo sync, and build all
@@ -48,9 +51,22 @@ Optional flags:
   --jobs        Number of jobs to run in parallel. This is passed to the
                 \`repo sync\` and the \`cros build-packages\` commands.
                 (Default: Half of the output of \`nproc\` command)
+  --sync-with-manifest, --sync-and-checkout, --checkout-only
+                Decide how to sync the source tree based on the build currently
+                installed on the DUT.
+                --sync-with-manifest (Googlers only): Downloads the build's
+                manifest and use it to sync. This guarantees to have exactly the
+                same source trees used to build the image installed on the DUT.
+                --sync-and-checkout: The previous default behavior. Sync the
+                source tree to the ToT and makes sure the same commit of the
+                chromiumos-overlay on the build. Since it's not the only overlay
+                plus some packages are not controlled by overlays, this approach
+                doesn't guarantee the exactly same tree and sometimes fails.
+                --checkout-only: The previous --no-sync behavior. Similar to
+                --sync-and-checkout but doesn't repo sync the tree.
+                (Default: --sync-with-manifest)
   --no-clean    Do not \`cros clean\` the SDK. (Deprecated, no-op)
   --no-flash    Do not \`cros flash\` the DUT. (Default: Flash)
-  --no-sync     Do not \`repo sync\` the tree. (Default: Sync)
   --help        Print this.
 EOF
 }
@@ -92,8 +108,6 @@ function checkout_overlay {
   local dut_ver
   dut_ver=`get_dut_lsb "CHROMEOS_RELEASE_VERSION"`
   if ! [[ "${dut_ver}" =~ ^[0-9]+\.0\.0$ ]]; then
-    # TODO(chharry): Add support of branched milestones. The branches like
-    # cros/release-R121-15699.B shall be helpful but need to fetch first.
     err "Invalid CHROMEOS_RELEASE_VERSION: ${dut_ver}"
     return 1
   fi
@@ -176,8 +190,8 @@ function process_args {
     --no-flash)
       FLASH=0
       ;;
-    --no-sync)
-      SYNC=0
+    --sync-with-manifest|--sync-and-checkout|--checkout-only)
+      SYNC="$1"
       ;;
     *)
       err "Unknow argument: $1"
@@ -240,11 +254,33 @@ function main {
       --disable-rootfs-verification \
       "${DUT}" "xbuddy://remote/${BOARD}/latest-canary/test"
   fi
-  if [[ ${SYNC} == 1 ]]; then
-    log "Running repo sync..."
-    repo sync --jobs="${JOBS}"
-  fi
-  checkout_overlay
+  case "${SYNC}" in
+    --sync-with-manifest)
+      log "Running repo sync with manifest..."
+      local dut_m dut_ver tmp_manifest_path
+      dut_m=`get_dut_lsb "CHROMEOS_RELEASE_CHROME_MILESTONE"`
+      dut_ver=`get_dut_lsb "CHROMEOS_RELEASE_VERSION"`
+      tmp_manifest_path=`mktemp --tmpdir prepare_for_emerge-manifest.XXXXXX.xml`
+      # trap the cleanup because set -e could terminate the program at anytime.
+      trap "rm ${tmp_manifest_path@Q}" EXIT
+      gsutil cp \
+        "gs://chromeos-manifest-versions/buildspecs/${dut_m}/${dut_ver}.xml" \
+        "${tmp_manifest_path}"
+      repo sync --jobs="${JOBS}" -m "${tmp_manifest_path}"
+      ;;
+    --sync-and-checkout)
+      log "Running repo sync..."
+      repo sync --jobs="${JOBS}"
+      checkout_overlay
+      ;;
+    --checkout-only)
+      checkout_overlay
+      ;;
+    *)
+      err "Unknow sync flag: ${SYNC}"
+      return 1
+      ;;
+  esac
   log "Building dependencies..."
   USE="${USE}" "${CROS_ROOT}"/chromite/bin/cros build-packages --cleanbuild \
     --skip-setup-board --board="${BOARD}" --jobs="${JOBS}" "${PACKAGES[@]}"
