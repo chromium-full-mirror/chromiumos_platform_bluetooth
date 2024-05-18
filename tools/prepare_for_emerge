@@ -20,6 +20,7 @@ USE="floss_upstream -cros-debug"
 CLEAN=1
 FLASH=1
 SYNC=1
+JOBS=$((`nproc`/2))
 
 function usage {
   cat <<EOF
@@ -45,6 +46,9 @@ Optional flags:
   --use         The USE flags for \`cros build-packages\`.
                 (Default: "floss_upstream -cros-debug")
   --cros-root   The CrOS root path. (Default: Auto-detected from script path)
+  --jobs        Number of jobs to run in parallel. This is passed to the
+                \`repo sync\` and the \`cros build-packages\` commands.
+                (Default: Half of the output of \`nproc\` command)
   --no-clean    Do not \`cros clean\` the SDK. (Default: Clean)
   --no-flash    Do not \`cros flash\` the DUT. (Default: Flash)
   --no-sync     Do not \`repo sync\` the tree. (Default: Sync)
@@ -127,6 +131,7 @@ function checkout_overlay {
 #   CROS_ROOT
 #   PACKAGES
 #   USE
+#   JOBS
 #   CLEAN
 #   FLASH
 #   SYNC
@@ -161,6 +166,10 @@ function process_args {
       ;;
     --cros-root)
       CROS_ROOT="$2"
+      shift
+      ;;
+    --jobs)
+      JOBS="$2"
       shift
       ;;
     --no-clean)
@@ -217,6 +226,7 @@ function process_args {
     CROS_ROOT=${CROS_ROOT}
     PACKAGES=${PACKAGES[@]}
     USE=${USE}
+    JOBS=${JOBS}
     CLEAN=${CLEAN}
     FLASH=${FLASH}
     SYNC=${SYNC}"
@@ -239,12 +249,12 @@ function main {
   fi
   if [[ ${SYNC} == 1 ]]; then
     log "Running repo sync..."
-    repo sync -j40
+    repo sync --jobs="${JOBS}"
   fi
   checkout_overlay
   log "Building dependencies..."
   USE="${USE}" "${CROS_ROOT}"/chromite/bin/cros build-packages \
-    --skip-setup-board --board="${BOARD}" --jobs=40 "${PACKAGES[@]}"
+    --skip-setup-board --board="${BOARD}" --jobs="${JOBS}" "${PACKAGES[@]}"
 }
 
 main "$@"
