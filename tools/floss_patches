@@ -11,7 +11,9 @@ from datetime import datetime
 from datetime import timezone
 import json
 import logging
+import os
 from pathlib import Path
+import re
 import shutil
 import string
 import subprocess
@@ -241,17 +243,102 @@ class OverlayHelper(object):
                     return line[len(self.GIT_AM_HINT_PREFIX) : -1]
         raise RuntimeError("Git am hint not found in ebuild")
 
+    def floss_add_new_release_patch(self, subject, content):
+        """Adds a new release patch in ChromiumOS overlay.
 
-def gerrit(api_name, method=None, data=None):
+        Determines the new patch file name, writes the content, and updates the
+        floss ebuild.
+
+        Args:
+            subject: The subject string of the patch, this is used for
+                     determining the patch filename.
+            content: The patch file content. This is write to the disk as is.
+        """
+        with open(str(self.ebuild_path), "r") as filehandle:
+            floss_ebuild_lines = filehandle.readlines()
+
+        # Determine the new patch file number by reading the last one.
+        rel_patches_end_line = floss_ebuild_lines.index(
+            self.REL_PATCHES_END_LINE
+        )
+        patch_dirpath = '\t"${FILESDIR}"/patches/'
+        last_patch_file_line = floss_ebuild_lines[rel_patches_end_line - 1]
+        if (
+            last_patch_file_line == self.REL_PATCHES_START_LINE
+            or last_patch_file_line.startswith(patch_dirpath + "0")
+        ):
+            # No existing patches or no upstream patches, starts from 1001.
+            new_file_num = "1001"
+        elif last_patch_file_line.startswith(patch_dirpath):
+            # At least one upstream patch exists, use the next number.
+            last_patch_file_name = last_patch_file_line[len(patch_dirpath) :]
+            last_patch_file_num = last_patch_file_name[
+                : last_patch_file_name.index("-")
+            ]
+            if (
+                len(last_patch_file_num) != 4
+                or not last_patch_file_num.isdigit()
+            ):
+                raise RuntimeError(
+                    "Invalid patch file name: {}".format(last_patch_file_name)
+                )
+            new_file_num = str(int(last_patch_file_num, base=10) + 1)
+        else:
+            raise RuntimeError(
+                "Invalid line before REL_PATCHES array end: {}".format(
+                    last_patch_file_line
+                )
+            )
+
+        # Compose the name. Only allow alpha number and separate the words with
+        # "-". E.g. "CHROMIUM: Add sco quirk for pixel buds pro" ->
+        # "0001-CHROMIUM-Add-sco-quirk-for-pixel-buds-pro.patch"
+        new_file_name = "-".join(
+            [new_file_num] + re.split("[^a-zA-Z0-9_]+", subject)
+        )
+        if len(new_file_name) + len(".patch") > 63:
+            new_file_name = (
+                new_file_name[:57] + ".patch"
+            )  # 57 == 63 - len(".patch")
+
+        # Update ebuild
+        with open(str(self.ebuild_path), "w") as filehandle:
+            filehandle.writelines(floss_ebuild_lines[:rel_patches_end_line])
+            filehandle.write(patch_dirpath + new_file_name + "\n")
+            filehandle.writelines(floss_ebuild_lines[rel_patches_end_line:])
+
+        # Write the content to the disk
+        rel_patches_path = self.floss_overlay_path / "files" / "patches"
+        if not rel_patches_path.exists():
+            os.mkdir(rel_patches_path, mode=0o750)
+        if not rel_patches_path.is_dir():
+            raise ValueError(f"{rel_patches_path} is not a dir")
+        with open(str(rel_patches_path / new_file_name), "w") as filehandle:
+            filehandle.write(content)
+
+
+def gerrit(
+    api_name,
+    method=None,
+    data=None,
+    instance="chromium",
+    auth=True,
+    raw_response=False,
+):
     """Sends requests to CrOS external Gerrit instance.
 
     Args:
         api_name: The Gerrit API name as part of Gerrit request URL.
         method: HTTP method e.g. 'GET', 'POST'.
         data: The HTTP body. It is always converted to JSON.
+        instance: The Gerrit server instance such as "chromium" or "android"
+        auth: Whether auth should be done for the method.
+        raw_response: If True, do not parse the response and return the bytes
+                      directly.
 
     Returns:
-        The parsed JSON response if any; Otherwise None.
+        None if no response, the raw bytes of response if |raw_response|, or the
+        parsed JSON response.
     """
 
     def get_git_cookies(path):
@@ -277,8 +364,8 @@ def gerrit(api_name, method=None, data=None):
             raise RuntimeError("Valid git cookie not found")
         return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-    url = f"https://chromium-review.googlesource.com/a/{api_name}"
-    headers = {"Cookie": get_git_cookies(f"/a/{api_name}")}
+    url = f"https://{instance}-review.googlesource.com{'/a' if auth else ''}{api_name}"
+    headers = {"Cookie": get_git_cookies(f"/a/{api_name}")} if auth else {}
     if data is not None:
         data = json.dumps(data).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
@@ -289,6 +376,9 @@ def gerrit(api_name, method=None, data=None):
 
     if not response:
         return None
+
+    if raw_response:
+        return response
 
     response = response.decode("utf-8")
     MAGIC_PREFIX = ")]}'"
@@ -609,6 +699,156 @@ def fix_upstream_patches_continue():
     )
 
 
+def land_aosp_patch(cl_number, branch="main"):
+    """Creates a CrOS CL for an AOSP Bluetooth CL.
+
+    Implementation of `floss_patches land`.
+    """
+    cl_id = (
+        "platform/packages/modules/Bluetooth".replace("/", "%2F")
+        + f"~{cl_number}"
+    )
+    patch_content = gerrit(
+        f"/changes/{cl_id}/revisions/current/patch",
+        method="GET",
+        instance="android",
+        auth=False,
+        raw_response=True,
+    )
+    patch_content = base64.b64decode(patch_content).decode("utf-8")
+    subject = ""
+    description_lines = []
+
+    # Parse content, extract subject and description.
+    # Subject could be multiple lines and ends with an empty line. Sample:
+    #   Subject: [PATCH] This
+    #    is subject
+    #
+    #   I am description 0.
+    #
+    #   I am description 1.
+    #
+    #   ---
+    SUBJECT_START_LINE_PREFIX = "Subject: [PATCH] "
+    DESCRIPTION_END_LINE = "---"
+    parsing_subject = False
+    parsing_description = False
+    for line in patch_content.splitlines(keepends=False):
+        if parsing_description:
+            if line == DESCRIPTION_END_LINE:
+                break
+            else:
+                description_lines.append(line)
+        else:
+            if parsing_subject:
+                if line:
+                    subject += line
+                else:
+                    parsing_description = True
+            elif line.startswith(SUBJECT_START_LINE_PREFIX):
+                subject = line[len(SUBJECT_START_LINE_PREFIX) :]
+                parsing_subject = True
+    else:
+        raise RuntimeError("Failed to extract subject and description")
+
+    # Compose new CL message. Remove floss prefix here to keep it consistent.
+    subject = subject.strip()
+    if subject[0:6].lower() == "floss:":
+        subject = subject[6:].strip()
+    # Some tags need to be removed and Bug/Test need renaming.
+    description = ""
+    bug = ""
+    test = ""
+    test_maybe_unfinished = False
+    for line in description_lines:
+        if line.startswith("Test: "):
+            test += "TEST={}\n".format(line[len("Test: ") :].strip())
+            test_maybe_unfinished = True
+        elif line.startswith("Bug: "):
+            # Multiple Bug tags in a single line is possible. This handles the
+            # below 2 cases although the 2nd is actually not parsed on Gerrit.
+            #   - Bug: 1, Bug: 2, Bug: 3
+            #   - Bug: 1, 2, 3
+            for tok in line.split(sep=","):
+                tok = tok.strip()
+                if tok.startswith("Bug:"):
+                    tok = tok[len("Bug:") :].strip()
+                if tok.isdigit():
+                    bug += f"BUG=b:{tok}\n"
+                else:
+                    raise RuntimeError(f"Unexpected char in Bug tag: {tok}")
+            test_maybe_unfinished = False
+        elif (
+            line.startswith("Tag: ")
+            or line.startswith("Flag: ")
+            or line.startswith("Change-Id: ")
+        ):
+            # Drop it
+            test_maybe_unfinished = False
+        else:
+            if not line.startswith(" "):
+                # If not starting with space, treat the Test tag ended.
+                test_maybe_unfinished = False
+
+            if test_maybe_unfinished:
+                test += line + "\n"
+            else:
+                description += line + "\n"
+    cl_message = f"""\
+floss UPSTREAM: {subject}
+
+{description.strip()}
+
+(cherry-pick from https://r.android.com/{cl_number})
+
+{bug.strip() or 'BUG=None'}
+{test.strip() or 'TEST=CQ'}
+"""
+
+    # Generate the overlay diff in a temporary directory.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = Path(temp_dir)
+        git_helper = GitHelper(temp_dir)
+        logging.info("Cloning chromiumos-overlay...")
+        # Cloning with depth=1 because the history is really heavy (~2GB).
+        git_helper.clone(
+            "https://chromium.googlesource.com/chromiumos/overlays/chromiumos-overlay",
+            branch=branch,
+            depth=1,
+        )
+        overlay_helper = OverlayHelper(temp_dir)
+        overlay_helper.floss_add_new_release_patch(
+            "UPSTREAM: " + subject, patch_content
+        )
+
+        git_helper.add()
+        diff = git_helper.diff()
+
+    response = input(
+        "@@@@@@@@@@@@@@@@@@@@@@@ description @@@@@@@@@@@@@@@@@@@@@@@@\n"
+        f"{cl_message}"
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        "\n"
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@ diff @@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        f"{diff.decode('utf-8')}"
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        "CAUTION: You are attempting to create a CL with the above description "
+        "and diff, continue? [N/y] "
+    )
+    if len(response) == 0 or response[0] not in "Yy":
+        logging.info("Exiting")
+        return
+    logging.info("Creating CL...")
+    change_input = {
+        "project": "chromiumos/overlays/chromiumos-overlay",
+        "branch": branch,
+        "subject": cl_message,
+        "patch": {"patch": base64.b64encode(diff).decode("utf-8")},
+    }
+    cl = gerrit("changes/", method="POST", data=change_input)
+    logging.info("Created CL: https://crrev.com/c/%s", cl["_number"])
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Manipulate the Floss upstream/local patches"
@@ -621,7 +861,7 @@ def main():
     )
     parser.add_argument(
         "command",
-        choices=["pull", "fix_upstream"],
+        choices=["pull", "fix_upstream", "land"],
         help=(
             "'pull' pulls the upstream patches to local, which should be done "
             "every time a merge is created. By default it works independently "
@@ -632,7 +872,11 @@ def main():
             "'fix_upstream' helps rebase the upstream patches to ToT. The "
             "developer should resolve the conflicts in the "
             ".../Bluetooth/upstream repo on the local storage, and re-run "
-            "this script with the '--continue' flag."
+            "this script with the '--continue' flag. "
+            "'land' helps land an AOSP Bluetooth CL (provided by '--cl_number')"
+            " to CrOS. It creates a ChromiumOS overlay CL on CrOS Gerrit. The "
+            "branch can be specified by '--branch'. This command doesn't rely "
+            "on local repo/data."
         ),
     )
     parser.add_argument(
@@ -644,6 +888,20 @@ def main():
             "flag to continue the progress."
         ),
         dest="continue_fix",
+    )
+    parser.add_argument(
+        "--cl_number",
+        required=True,
+        type=int,
+        help="Define which AOSP CL the 'land' command should land.",
+    )
+    parser.add_argument(
+        "--branch",
+        default="main",
+        help=(
+            "Define which CrOS branch the 'land' command should land to such "
+            "as 'release-R128-15964.B'. Default to 'main'"
+        ),
     )
 
     args = parser.parse_args()
@@ -669,6 +927,8 @@ def main():
             fix_upstream_patches_continue()
         else:
             fix_upstream_patches()
+    elif args.command == "land":
+        land_aosp_patch(args.cl_number, branch=args.branch)
     else:
         raise ValueError(f"Invalid command: {args.command}")
 
