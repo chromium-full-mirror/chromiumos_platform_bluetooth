@@ -364,8 +364,12 @@ def gerrit(
             raise RuntimeError("Valid git cookie not found")
         return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-    url = f"https://{instance}-review.googlesource.com{'/a' if auth else ''}{api_name}"
-    headers = {"Cookie": get_git_cookies(f"/a/{api_name}")} if auth else {}
+    url = f"https://{instance}-review.googlesource.com/"
+    headers = {}
+    if auth:
+        url += "a/"
+        headers["Cookie"] = get_git_cookies(f"/a/{api_name}")
+    url += api_name
     if data is not None:
         data = json.dumps(data).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
@@ -709,7 +713,7 @@ def land_aosp_patch(cl_number, branch="main"):
         + f"~{cl_number}"
     )
     patch_content = gerrit(
-        f"/changes/{cl_id}/revisions/current/patch",
+        f"changes/{cl_id}/revisions/current/patch",
         method="GET",
         instance="android",
         auth=False,
