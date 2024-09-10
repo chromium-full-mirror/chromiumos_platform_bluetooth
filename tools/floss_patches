@@ -300,6 +300,8 @@ class OverlayHelper(object):
             new_file_name = (
                 new_file_name[:57] + ".patch"
             )  # 57 == 63 - len(".patch")
+        else:
+            new_file_name += ".patch"
 
         # Update ebuild
         with open(str(self.ebuild_path), "w") as filehandle:
