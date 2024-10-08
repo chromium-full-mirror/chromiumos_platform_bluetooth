@@ -800,12 +800,17 @@ def land_aosp_patch(cl_number, branch="main"):
                 test += line + "\n"
             else:
                 description += line + "\n"
+
+    # If description is not empty, append a blank line to separate it from the
+    # following "cherry-pick ... " line.
+    description = description.strip()
+    if description:
+        description += "\n\n"
+
     cl_message = f"""\
 floss UPSTREAM: {subject}
 
-{description.strip()}
-
-(cherry-pick from https://r.android.com/{cl_number})
+{description}(cherry-pick from https://r.android.com/{cl_number})
 
 {bug.strip() or 'BUG=None'}
 {test.strip() or 'TEST=CQ'}
