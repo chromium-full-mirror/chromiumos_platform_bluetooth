@@ -53,6 +53,14 @@ class GitHelper(object):
         """Adds all changes into index."""
         subprocess.check_call(self.git_command + ["add", "."])
 
+    def commit(self, msg):
+        """Create a commit containing the current contents of the index
+
+        Args:
+            msg: commit message to the new commit
+        """
+        subprocess.check_call(self.git_command + ["commit", "-m", msg])
+
     def checkout(self, hash):
         subprocess.check_call(self.git_command + ["checkout", "--quiet", hash])
 
@@ -705,7 +713,7 @@ def fix_upstream_patches_continue():
     )
 
 
-def land_aosp_patch(cl_number, branch="main"):
+def land_aosp_patch(cl_number, branch="main", dest=None):
     """Creates a CrOS CL for an AOSP Bluetooth CL.
 
     Implementation of `floss_patches land`.
@@ -833,6 +841,14 @@ floss UPSTREAM: {subject}
         )
 
         git_helper.add()
+
+        # If --dest is set then we simply generate a patch file and return
+        if dest is not None:
+            git_helper.commit(msg=cl_message)
+            git_helper.format_patch("-1", out_dir=dest)
+            return
+
+        # Otherwise continue submitting to Gerrit
         diff = git_helper.diff()
 
     response = input(
@@ -913,6 +929,13 @@ def main():
             "as 'release-R128-15964.B'. Default to 'main'"
         ),
     )
+    parser.add_argument(
+        "--dest",
+        help=(
+            "If specified, the patch won't be submitted to Gerrit, instead,"
+            "we store a format patch under the specified path"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -941,7 +964,7 @@ def main():
         if args.cl_number is None:
             logging.error("Please provide --cl_number")
             return
-        land_aosp_patch(args.cl_number, branch=args.branch)
+        land_aosp_patch(args.cl_number, branch=args.branch, dest=args.dest)
     else:
         raise ValueError(f"Invalid command: {args.command}")
 
