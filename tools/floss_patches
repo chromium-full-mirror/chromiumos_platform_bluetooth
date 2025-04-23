@@ -81,7 +81,9 @@ class GitHelper(object):
             cmd.append(f"--stat={stat}")
         return subprocess.check_output(self.git_command + cmd)
 
-    def format_patch(self, range, out_dir=None, unified=None, signature=None):
+    def format_patch(
+        self, range, out_dir=None, stdout=False, unified=None, signature=None
+    ):
         """Generates patches.
 
         Args:
@@ -91,21 +93,28 @@ class GitHelper(object):
                    Alternatively, use -<n> to generate patches from the topmost
                    <n> commits.
             out_dir: The output directory path str.
+            stdout: If True, don't generate the patch file and dump it to stdout
+                    instead.
             unified: An int indicating the lines before and after the changed
                      lines.
             signature: The signature str at the end of the patch file.
+
+        Returns:
+            The standard output of the command, decoded with utf-8.
         """
         cmd = ["format-patch", range]
         if out_dir is not None:
             cmd.append("--output-directory")
             cmd.append(out_dir)
+        if stdout:
+            cmd.append("--stdout")
         if unified is not None:
             cmd.append(f"--unified={unified}")
         if signature is None:
             cmd.append("--no-signature")
         else:
             cmd.append(f"--signature={signature}")
-        subprocess.check_call(self.git_command + cmd)
+        return subprocess.check_output(self.git_command + cmd).decode("utf-8")
 
     def get_head_commit(self):
         return (
@@ -730,6 +739,33 @@ def land_aosp_patch(cl_number, branch="main", dest=None):
         raw_response=True,
     )
     patch_content = base64.b64decode(patch_content).decode("utf-8")
+    make_cp_to_cros(
+        patch_content,
+        "UPSTREAM",
+        f"https://r.android.com/{cl_number}",
+        branch=branch,
+        dest=dest,
+    )
+
+
+def land_ag_patch(cl_number, hash, repo_path, branch="main", dest=None):
+    """Creates a CrOS CL for an internal Bluetooth CL.
+
+    Implementation of `floss_patches land --internal`.
+    """
+    git_helper = GitHelper(repo_path)
+    patch_content = git_helper.format_patch(f"{hash}~..{hash}", stdout=True)
+    make_cp_to_cros(
+        patch_content,
+        "FROMGIT",
+        f"http://ag/{cl_number}",
+        branch=branch,
+        dest=dest,
+    )
+
+
+def make_cp_to_cros(patch_content, cp_tag, cp_url, branch="main", dest=None):
+    """Makes a Floss cherry-pick CL in the ChromiumOS Overlay repo."""
     subject = ""
     description_lines = []
 
@@ -816,9 +852,9 @@ def land_aosp_patch(cl_number, branch="main", dest=None):
         description += "\n\n"
 
     cl_message = f"""\
-floss UPSTREAM: {subject}
+floss {cp_tag}: {subject}
 
-{description}(cherry-pick from https://r.android.com/{cl_number})
+{description}(cherry-pick from {cp_url})
 
 {bug.strip() or 'BUG=None'}
 {test.strip() or 'TEST=CQ'}
@@ -837,7 +873,7 @@ floss UPSTREAM: {subject}
         )
         overlay_helper = OverlayHelper(temp_dir)
         overlay_helper.floss_add_new_release_patch(
-            "UPSTREAM: " + subject, patch_content
+            cp_tag + ": " + subject, patch_content
         )
 
         git_helper.add()
@@ -932,8 +968,33 @@ def main():
     parser.add_argument(
         "--dest",
         help=(
-            "If specified, the patch won't be submitted to Gerrit, instead,"
-            "we store a format patch under the specified path"
+            "Only works with 'land' command. If specified, the patch won't be "
+            "submitted to Gerrit, instead, we store a format patch under the "
+            "specified path."
+        ),
+    )
+    parser.add_argument(
+        "--internal",
+        action="store_true",
+        help=(
+            "Only works with 'land' command. When True, get the patch content "
+            "from the local git repo rather than the Gerrit. The patch is "
+            "marked as cherry-pick from http://ag/ and a FROMGIT tag is added."
+        ),
+    )
+    parser.add_argument(
+        "--hash",
+        help=(
+            "Only works with 'land --internal' command. The hash indicates the "
+            "commit that is going to be landed to CrOS."
+        ),
+    )
+    parser.add_argument(
+        "--repo_path",
+        default=".",
+        help=(
+            "Only works with 'land --internal' command. This indicates the git "
+            "repo path where the hash live in. Default to '.'"
         ),
     )
 
@@ -964,7 +1025,19 @@ def main():
         if args.cl_number is None:
             logging.error("Please provide --cl_number")
             return
-        land_aosp_patch(args.cl_number, branch=args.branch, dest=args.dest)
+        if not args.internal:
+            land_aosp_patch(args.cl_number, branch=args.branch, dest=args.dest)
+        else:
+            if args.hash is None:
+                logging.error("Please provide --hash")
+                return
+            land_ag_patch(
+                args.cl_number,
+                args.hash,
+                args.repo_path,
+                branch=args.branch,
+                dest=args.dest,
+            )
     else:
         raise ValueError(f"Invalid command: {args.command}")
 
