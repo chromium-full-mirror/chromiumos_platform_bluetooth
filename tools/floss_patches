@@ -650,13 +650,13 @@ def fix_upstream_patches():
     git_helper = GitHelper(floss_path)
     if not git_helper.is_clean():
         raise RuntimeError("Floss upstream repo is not clean")
-    git_helper.check_is_ancestor(hint, "cros/upstream/main")
+    git_helper.check_is_ancestor(hint, "cros-internal/upstream/main")
 
     # Am and rebase
     git_helper.checkout(hint)
     git_helper.am([str(p) for p in sorted(patches_path.iterdir())])
     try:
-        git_helper.rebase("cros/upstream/main")
+        git_helper.rebase("cros-internal/upstream/main")
     except subprocess.CalledProcessError:
         logging.warning(
             "!!! Please follow the instructions above to resolve the "
@@ -703,14 +703,14 @@ def fix_upstream_patches_continue():
     logging.info("Generating patch files...")
     rebased_head = git_helper.get_head_commit()
     git_helper.format_patch(
-        f"cros/upstream/main..{rebased_head}",
+        f"cros-internal/upstream/main..{rebased_head}",
         out_dir=str(patches_path),
         unified=1,
         signature=None,
     )
 
     # Update hint
-    git_helper.checkout("cros/upstream/main")
+    git_helper.checkout("cros-internal/upstream/main")
     new_hint = git_helper.get_head_commit()
     overlay_helper.floss_update_git_am_hint(new_hint)
 
