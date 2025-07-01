@@ -922,27 +922,32 @@ def main():
         default="info",
         help="Loging level. Default to 'info'",
     )
-    parser.add_argument(
-        "command",
-        choices=["pull", "fix_upstream", "land"],
+    subparsers = parser.add_subparsers(
+        required=True,
+        dest="command",
+    )
+
+    parser_pull = subparsers.add_parser(
+        "pull",
         help=(
-            "'pull' pulls the upstream patches to local, which should be done "
-            "every time a merge is created. By default it works independently "
-            "and doesn't rely on any local data. It creates a merge in the "
+            "Pulls the upstream patches to local, which should be done every "
+            "time a merge is created. By default it works independently and "
+            "doesn't rely on any local data. It creates a merge in the "
             ".../Bluetooth/local repo and the proto_logging repo, pulls all "
             "upstream patches to local in chromiumos-overlay repo, properly "
-            "set Cq-Depend, and vote CQ+1 for each. "
-            "'fix_upstream' helps rebase the upstream patches to ToT. The "
-            "developer should resolve the conflicts in the "
-            ".../Bluetooth/upstream repo on the local storage, and re-run "
-            "this script with the '--continue' flag. "
-            "'land' helps land an AOSP Bluetooth CL (provided by '--cl_number')"
-            " to CrOS. It creates a ChromiumOS overlay CL on CrOS Gerrit. The "
-            "branch can be specified by '--branch'. This command doesn't rely "
-            "on local repo/data."
+            "set Cq-Depend, and vote CQ+1 for each."
         ),
     )
-    parser.add_argument(
+
+    parser_fix_upstream = subparsers.add_parser(
+        "fix_upstream",
+        help=(
+            "Helps rebase the upstream patches to ToT. The developer should "
+            "resolve the conflicts in the .../Bluetooth/upstream repo on the "
+            "local storage, and re-run this script with the '--continue' flag."
+        ),
+    )
+    parser_fix_upstream.add_argument(
         "--continue",
         action="store_true",
         help=(
@@ -952,12 +957,22 @@ def main():
         ),
         dest="continue_fix",
     )
-    parser.add_argument(
+
+    parser_land = subparsers.add_parser(
+        "land",
+        help=(
+            "Lands an AOSP Bluetooth CL (provided by '--cl_number') to CrOS. "
+            "It creates a ChromiumOS overlay CL on CrOS Gerrit. The branch can "
+            "be specified by '--branch'. This command doesn't rely on local "
+            "repo/data."
+        ),
+    )
+    parser_land.add_argument(
         "--cl_number",
         type=int,
         help="Define which AOSP CL the 'land' command should land.",
     )
-    parser.add_argument(
+    parser_land.add_argument(
         "--branch",
         default="main",
         help=(
@@ -965,7 +980,7 @@ def main():
             "as 'release-R128-15964.B'. Default to 'main'"
         ),
     )
-    parser.add_argument(
+    parser_land.add_argument(
         "--dest",
         help=(
             "Only works with 'land' command. If specified, the patch won't be "
@@ -973,7 +988,7 @@ def main():
             "specified path."
         ),
     )
-    parser.add_argument(
+    parser_land.add_argument(
         "--internal",
         action="store_true",
         help=(
@@ -982,14 +997,14 @@ def main():
             "marked as cherry-pick from http://ag/ and a FROMGIT tag is added."
         ),
     )
-    parser.add_argument(
+    parser_land.add_argument(
         "--hash",
         help=(
             "Only works with 'land --internal' command. The hash indicates the "
             "commit that is going to be landed to CrOS."
         ),
     )
-    parser.add_argument(
+    parser_land.add_argument(
         "--repo_path",
         default=".",
         help=(
