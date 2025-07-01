@@ -116,6 +116,21 @@ class GitHelper(object):
             cmd.append(f"--signature={signature}")
         return subprocess.check_output(self.git_command + cmd).decode("utf-8")
 
+    def fetch(self, repository=None, refspec=None):
+        """Fetches a repo from the remote repository.
+
+        Args:
+            repository: The remote repo URL str.
+            refspec: The target branches spec str. Would be ignored if
+                     |repository| is None.
+        """
+        cmd = self.git_command + ["fetch"]
+        if repository:
+            cmd.append(repository)
+            if refspec:
+                cmd.append(refspec)
+        subprocess.check_call(cmd)
+
     def get_head_commit(self):
         return (
             subprocess.check_output(
@@ -477,13 +492,30 @@ def fix_upstream_patches_continue():
     )
 
 
-def land_ag_patch(cl_number, hash, repo_path, branch="main", dest=None):
+def land_ag_patch(cl_number, hash, branch="main", dest=None):
     """Creates a CrOS CL for an internal Bluetooth CL.
 
     Implementation of `floss_patches land`.
     """
-    git_helper = GitHelper(repo_path)
-    patch_content = git_helper.format_patch(f"{hash}~..{hash}", stdout=True)
+    floss_path, _ = get_upstream_floss_and_overlay_path()
+    git_helper = GitHelper(floss_path)
+    try:
+        patch_content = git_helper.format_patch(
+            f"{hash}~..{hash}", unified=1, signature=None, stdout=True
+        )
+    except subprocess.CalledProcessError:
+        response = input(
+            "Failed to format patch for the hash, fetch "
+            "cros-internal/upstream/main and retry? [N/y]"
+        )
+        if not response or response[0] not in "Yy":
+            logging.info("Exiting")
+            return
+        git_helper.fetch("cros-internal", "upstream/main")
+        patch_content = git_helper.format_patch(
+            f"{hash}~..{hash}", unified=1, signature=None, stdout=True
+        )
+
     subject = ""
     description_lines = []
 
@@ -700,13 +732,6 @@ def main():
             "store a format patch under the specified path."
         ),
     )
-    parser_land.add_argument(
-        "--repo_path",
-        default=".",
-        help=(
-            "Indicates the git repo path where the hash live in. Default to '.'"
-        ),
-    )
 
     args = parser.parse_args()
 
@@ -726,7 +751,6 @@ def main():
         land_ag_patch(
             args.cl_number,
             args.hash,
-            args.repo_path,
             branch=args.branch,
             dest=args.dest,
         )
