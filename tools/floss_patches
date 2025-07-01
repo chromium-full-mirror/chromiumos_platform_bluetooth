@@ -146,12 +146,19 @@ class OverlayHelper(object):
     REL_PATCHES_START_LINE = "REL_PATCHES=(\n"
     REL_PATCHES_END_LINE = ")  # REL_PATCHES end\n"
 
-    def __init__(self, path):
+    def __init__(self, path, is_upstream):
         self.overlay_path = path
-        self.floss_overlay_path = self.overlay_path / "net-wireless" / "floss"
+
+        overlay_name = "floss-upstream" if is_upstream else "floss"
+        self.floss_overlay_path = (
+            self.overlay_path / "net-wireless" / overlay_name
+        )
         if not self.floss_overlay_path.is_dir():
             raise ValueError("Failed to anchor Floss overlay directory path")
-        self.ebuild_path = self.floss_overlay_path / "floss-9999.ebuild"
+
+        self.ebuild_path = (
+            self.floss_overlay_path / f"{overlay_name}-9999.ebuild"
+        )
         if not self.ebuild_path.is_file():
             raise ValueError("Failed to anchor Floss ebuild path")
 
@@ -604,7 +611,7 @@ def pull():
     set_depend_and_vote(bt_cl, overlay_cl, proto_cl)
 
 
-def get_local_floss_and_overlay_path():
+def get_upstream_floss_and_overlay_path():
     cros_root = Path(__file__).resolve().parent
     for _ in range(4):
         cros_root = cros_root.parent
@@ -617,7 +624,7 @@ def get_local_floss_and_overlay_path():
         / "Bluetooth"
         / "upstream"
     )
-    overlay_path = cros_root / "src" / "third_party" / "chromiumos-overlay"
+    overlay_path = cros_root / "src" / "private-overlays" / "chromeos-overlay"
     if not floss_path.is_dir():
         raise RuntimeError("Failed to anchor Floss upstream path in CrOS SDK")
     if not overlay_path.is_dir():
@@ -630,8 +637,8 @@ def fix_upstream_patches():
 
     Implementation of `floss_patches fix_upstream`.
     """
-    floss_path, overlay_path = get_local_floss_and_overlay_path()
-    overlay_helper = OverlayHelper(overlay_path)
+    floss_path, overlay_path = get_upstream_floss_and_overlay_path()
+    overlay_helper = OverlayHelper(overlay_path, is_upstream=True)
     patches_path = (
         overlay_helper.floss_overlay_path / "files" / "patches_upstream"
     )
@@ -675,8 +682,8 @@ def fix_upstream_patches_continue():
 
     Implementation of `floss_patches fix_upstream`.
     """
-    floss_path, overlay_path = get_local_floss_and_overlay_path()
-    overlay_helper = OverlayHelper(overlay_path)
+    floss_path, overlay_path = get_upstream_floss_and_overlay_path()
+    overlay_helper = OverlayHelper(overlay_path, is_upstream=True)
     patches_path = (
         overlay_helper.floss_overlay_path / "files" / "patches_upstream"
     )
@@ -834,7 +841,7 @@ floss UPSTREAM: {subject}
             branch=branch,
             depth=1,
         )
-        overlay_helper = OverlayHelper(temp_dir)
+        overlay_helper = OverlayHelper(temp_dir, is_upstream=False)
         overlay_helper.floss_add_new_release_patch(
             "UPSTREAM: " + subject, patch_content
         )
