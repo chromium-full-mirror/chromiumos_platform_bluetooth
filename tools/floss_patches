@@ -722,50 +722,13 @@ def fix_upstream_patches_continue():
     )
 
 
-def land_aosp_patch(cl_number, branch="main", dest=None):
-    """Creates a CrOS CL for an AOSP Bluetooth CL.
-
-    Implementation of `floss_patches land`.
-    """
-    cl_id = (
-        "platform/packages/modules/Bluetooth".replace("/", "%2F")
-        + f"~{cl_number}"
-    )
-    patch_content = gerrit(
-        f"changes/{cl_id}/revisions/current/patch",
-        method="GET",
-        instance="android",
-        auth=False,
-        raw_response=True,
-    )
-    patch_content = base64.b64decode(patch_content).decode("utf-8")
-    make_cp_to_cros(
-        patch_content,
-        "UPSTREAM",
-        f"https://r.android.com/{cl_number}",
-        branch=branch,
-        dest=dest,
-    )
-
-
 def land_ag_patch(cl_number, hash, repo_path, branch="main", dest=None):
     """Creates a CrOS CL for an internal Bluetooth CL.
 
-    Implementation of `floss_patches land --internal`.
+    Implementation of `floss_patches land`.
     """
     git_helper = GitHelper(repo_path)
     patch_content = git_helper.format_patch(f"{hash}~..{hash}", stdout=True)
-    make_cp_to_cros(
-        patch_content,
-        "FROMGIT",
-        f"http://ag/{cl_number}",
-        branch=branch,
-        dest=dest,
-    )
-
-
-def make_cp_to_cros(patch_content, cp_tag, cp_url, branch="main", dest=None):
-    """Makes a Floss cherry-pick CL in the ChromiumOS Overlay repo."""
     subject = ""
     description_lines = []
 
@@ -852,9 +815,9 @@ def make_cp_to_cros(patch_content, cp_tag, cp_url, branch="main", dest=None):
         description += "\n\n"
 
     cl_message = f"""\
-floss {cp_tag}: {subject}
+floss UPSTREAM: {subject}
 
-{description}(cherry-pick from {cp_url})
+{description}(cherry-pick from http://ag/{cl_number})
 
 {bug.strip() or 'BUG=None'}
 {test.strip() or 'TEST=CQ'}
@@ -873,7 +836,7 @@ floss {cp_tag}: {subject}
         )
         overlay_helper = OverlayHelper(temp_dir)
         overlay_helper.floss_add_new_release_patch(
-            cp_tag + ": " + subject, patch_content
+            "UPSTREAM: " + subject, patch_content
         )
 
         git_helper.add()
@@ -961,55 +924,44 @@ def main():
     parser_land = subparsers.add_parser(
         "land",
         help=(
-            "Lands an AOSP Bluetooth CL (provided by '--cl_number') to CrOS. "
-            "It creates a ChromiumOS overlay CL on CrOS Gerrit. The branch can "
-            "be specified by '--branch'. This command doesn't rely on local "
-            "repo/data."
+            "Lands an internal Android Bluetooth CL to CrOS. "
+            "It creates a ChromiumOS overlay CL on CrOS Gerrit."
         ),
     )
     parser_land.add_argument(
         "--cl_number",
         type=int,
-        help="Define which AOSP CL the 'land' command should land.",
+        required=True,
+        help=(
+            "The internal Android CL number (ag/XXXX) that's added in the "
+            "commit message."
+        ),
+    )
+    parser_land.add_argument(
+        "--hash",
+        required=True,
+        help="Indicates the commit that is going to be landed to CrOS.",
     )
     parser_land.add_argument(
         "--branch",
         default="main",
         help=(
-            "Define which CrOS branch the 'land' command should land to such "
+            "Defines which CrOS branch the 'land' command should land to such "
             "as 'release-R128-15964.B'. Default to 'main'"
         ),
     )
     parser_land.add_argument(
         "--dest",
         help=(
-            "Only works with 'land' command. If specified, the patch won't be "
-            "submitted to Gerrit, instead, we store a format patch under the "
-            "specified path."
-        ),
-    )
-    parser_land.add_argument(
-        "--internal",
-        action="store_true",
-        help=(
-            "Only works with 'land' command. When True, get the patch content "
-            "from the local git repo rather than the Gerrit. The patch is "
-            "marked as cherry-pick from http://ag/ and a FROMGIT tag is added."
-        ),
-    )
-    parser_land.add_argument(
-        "--hash",
-        help=(
-            "Only works with 'land --internal' command. The hash indicates the "
-            "commit that is going to be landed to CrOS."
+            "If specified, the patch won't be submitted to Gerrit, instead, we "
+            "store a format patch under the specified path."
         ),
     )
     parser_land.add_argument(
         "--repo_path",
         default=".",
         help=(
-            "Only works with 'land --internal' command. This indicates the git "
-            "repo path where the hash live in. Default to '.'"
+            "Indicates the git repo path where the hash live in. Default to '.'"
         ),
     )
 
@@ -1037,22 +989,13 @@ def main():
         else:
             fix_upstream_patches()
     elif args.command == "land":
-        if args.cl_number is None:
-            logging.error("Please provide --cl_number")
-            return
-        if not args.internal:
-            land_aosp_patch(args.cl_number, branch=args.branch, dest=args.dest)
-        else:
-            if args.hash is None:
-                logging.error("Please provide --hash")
-                return
-            land_ag_patch(
-                args.cl_number,
-                args.hash,
-                args.repo_path,
-                branch=args.branch,
-                dest=args.dest,
-            )
+        land_ag_patch(
+            args.cl_number,
+            args.hash,
+            args.repo_path,
+            branch=args.branch,
+            dest=args.dest,
+        )
     else:
         raise ValueError(f"Invalid command: {args.command}")
 
