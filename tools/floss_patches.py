@@ -391,8 +391,18 @@ def get_upstream_floss_and_overlay_path():
     if not floss_path.is_dir():
         raise RuntimeError("Failed to anchor Floss upstream path in CrOS SDK")
     if not overlay_path.is_dir():
-        raise RuntimeError("Failed to anchor chromiumos-overlay in CrOS SDK")
+        raise RuntimeError("Failed to anchor chromeos-overlay in CrOS SDK")
     return floss_path, overlay_path
+
+
+def get_chromiumos_overlay_path():
+    cros_root = Path(__file__).resolve().parent
+    for _ in range(4):
+        cros_root = cros_root.parent
+    overlay_path = cros_root / "src" / "third_party" / "chromiumos-overlay"
+    if not overlay_path.is_dir():
+        raise RuntimeError("Failed to anchor chromiumos-overlay in CrOS SDK")
+    return overlay_path
 
 
 def fix_upstream_patches():
@@ -492,7 +502,9 @@ def fix_upstream_patches_continue():
     )
 
 
-def land_ag_patch(cl_number, hash, branch="main", dest=None):
+def land_ag_patch(
+    cl_number, hash, branch="main", dest=None, use_local_overlay=False
+):
     """Creates a CrOS CL for an internal Bluetooth CL.
 
     Implementation of `floss_patches land`.
@@ -609,6 +621,19 @@ floss UPSTREAM: {subject}
 {bug.strip() or 'BUG=None'}
 {test.strip() or 'TEST=CQ'}
 """
+
+    if use_local_overlay:
+        overlay_path = get_chromiumos_overlay_path()
+        git_helper = GitHelper(overlay_path)
+        if not git_helper.is_clean():
+            raise RuntimeError("Local overlay repo is not clean")
+        overlay_helper = OverlayHelper(overlay_path, is_upstream=False)
+        overlay_helper.floss_add_new_release_patch(
+            "UPSTREAM: " + subject, patch_content
+        )
+        git_helper.add()
+        git_helper.commit(msg=cl_message)
+        return
 
     # Generate the overlay diff in a temporary directory.
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -732,6 +757,15 @@ def main():
             "store a format patch under the specified path."
         ),
     )
+    parser_land.add_argument(
+        "--use_local_overlay",
+        action="store_true",
+        help=(
+            "If specified, the patch won't be submitted to Gerrit, instead, "
+            "the result is directly applied to the overlay. "
+            "This overwrites arg --dest"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -753,6 +787,7 @@ def main():
             args.hash,
             branch=args.branch,
             dest=args.dest,
+            use_local_overlay=args.use_local_overlay,
         )
     else:
         raise ValueError(f"Invalid command: {args.command}")
