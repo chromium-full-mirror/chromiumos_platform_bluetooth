@@ -496,7 +496,7 @@ def fix_upstream_patches_continue():
 
     logging.info(
         "Fix patches done. "
-        "Test it with `USE=floss_upstream emerge-${BOARD} floss`, "
+        "Test it with `USE=floss_upstream emerge-${BOARD} floss-upstream`, "
         "and upload the changes in %s for review.",
         overlay_path,
     )
